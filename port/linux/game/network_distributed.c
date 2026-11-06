@@ -690,6 +690,12 @@ static struct distributed_client_identity distributed_sent_identity;
 client: whether it sent its own this game */
 static struct distributed_client_build distributed_client_builds[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 static boolean distributed_client_build_known[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
+#define DCE_SLOW_LINE_PERIOD_TICKS 3
+static boolean distributed_machine_slow_line(long machine_index)
+{
+	return distributed_client_build_known[machine_index] &&
+		strstr(distributed_client_builds[machine_index].mods, "dce-modem") != NULL;
+}
 static boolean distributed_build_sent;
 static boolean distributed_identity_sent;
 static struct distributed_client_clock
@@ -3263,12 +3269,19 @@ static void distributed_host_plan_players(
 			{
 				distributed_seen[machine_index][player_index] = TRUE;
 			}
+			/* DCE official server: a client that says it is on a modem (its build's
+			mods name dce-modem) gets each player every 3rd tick at most, its own too */
+			if (distributed_machine_slow_line(machine_index))
+			{
+				period = MAX(period, DCE_SLOW_LINE_PERIOD_TICKS);
+				send = FALSE;
+			}
 			send |= changed[player_index] || (now + player_index) % period == 0;
 			if (seen || own)
 				SET_FLAG(*sends, _distributed_send_sees_bit, TRUE);
-			if (send || own)
+			if (send || (own && !distributed_machine_slow_line(machine_index)))
 				SET_FLAG(*sends, _distributed_send_state_bit, TRUE);
-			if (!own && has_action[player_index] && (send || action_changed[player_index]))
+			if (!own && has_action[player_index] && (send || (action_changed[player_index] && !distributed_machine_slow_line(machine_index))))
 				SET_FLAG(*sends, _distributed_send_action_bit, TRUE);
 		}
 	}
