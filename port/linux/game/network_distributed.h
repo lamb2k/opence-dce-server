@@ -368,6 +368,8 @@ unsigned long distributed_machine_real_address(long machine_index);
 unsigned long distributed_real_address(unsigned long address);
 /* (the host) a client machine's build as it told it: FALSE if it told none
 (a build before the message, or not yet) */
+/* DCE official server: this client told us it is on a modem */
+boolean distributed_machine_slow_line(long machine_index);
 boolean distributed_machine_client_build(long machine_index, struct distributed_client_build *build);
 
 /* ---------- prototypes/NETWORK_VOTEKICK.C */

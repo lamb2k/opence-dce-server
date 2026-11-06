@@ -691,7 +691,7 @@ client: whether it sent its own this game */
 static struct distributed_client_build distributed_client_builds[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 static boolean distributed_client_build_known[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 #define DCE_SLOW_LINE_PERIOD_TICKS 3
-static boolean distributed_machine_slow_line(long machine_index)
+boolean distributed_machine_slow_line(long machine_index)
 {
 	return distributed_client_build_known[machine_index] &&
 		strstr(distributed_client_builds[machine_index].mods, "dce-modem") != NULL;

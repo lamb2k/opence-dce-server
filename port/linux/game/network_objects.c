@@ -1517,6 +1517,7 @@ static void distributed_host_send_states(
 	long told_count = objects_host_told_count;
 	long state_count = 0;
 	long absolute_index;
+	long round_from;
 	long step;
 	short machine_number;
 
@@ -1539,6 +1540,7 @@ static void distributed_host_send_states(
 		distributed_state_from_object(object_index, &states[state_count]);
 		kinds[state_count++] = at_rest ? _host_state_to_all : _host_state_moving;
 	}
+	round_from = state_count;
 	/* those at rest from the cursor on, round to it */
 	for (step = 0; step < told_count && resting < RESTING_STATES_PER_TICK; step++)
 	{
@@ -1558,6 +1560,7 @@ static void distributed_host_send_states(
 		long machine_index = objects_host_viewers.indices[machine_number];
 		short count = 0;
 		long index;
+		boolean slow = distributed_machine_slow_line(machine_index);
 
 		for (index = 0; index < state_count; index++)
 		{
@@ -1565,6 +1568,9 @@ static void distributed_host_send_states(
 			short own_vehicle = NONE;
 			short vehicle_number;
 
+			/* DCE official server: on a modem the round of objects at rest comes one tick in 10 */
+			if (index >= round_from && slow && game_time_get() % 10 != 0)
+				continue;
 			for (vehicle_number = 0; vehicle_number < objects_host_viewers.machines[machine_number].vehicle_count;
 				vehicle_number++)
 			{
@@ -1578,6 +1584,9 @@ static void distributed_host_send_states(
 			{
 				short period = own_vehicle != NONE ? OWN_VEHICLE_PERIOD_TICKS :
 					distributed_host_object_period(machine_number, &states[index].position);
+
+				if (slow && period < 3)
+					period = 3;
 
 				if ((game_time_get() + (own_vehicle != NONE ? 0 : DATUM_INDEX_TO_ABSOLUTE_INDEX(states[index].object_index))) %
 					period != 0)
