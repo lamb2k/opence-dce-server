@@ -600,7 +600,20 @@ const unsigned char *p2p_identifier(void)
 	pthread_mutex_lock(&identifier_lock);
 	if (!has_identifier)
 	{
-		posix_random_bytes(seed, sizeof(seed));
+		/* DCE official server: HALO_DCE_HOST_SEED (hex, the seed's size) keeps one key
+		across restarts and moves of the server, so a client can pin it. Unset: random. */
+		{
+			const char *fixed = getenv("HALO_DCE_HOST_SEED");
+			int at, ok = fixed && strlen(fixed) == 2 * sizeof(seed);
+			for (at = 0; ok && at < (int)sizeof(seed); at++)
+			{
+				unsigned value;
+				ok = sscanf(fixed + 2 * at, "%2x", &value) == 1;
+				seed[at] = (unsigned char)value;
+			}
+			if (!ok)
+				posix_random_bytes(seed, sizeof(seed));
+		}
 		p2p_ed25519_public(seed, signing_key, secret_key);
 		p2p_x25519(public_key, secret_key, NULL);
 		p2p_identifier_for(public_key, identifier);
@@ -3135,7 +3148,20 @@ static void make_invite(void)
 	unsigned char bytes[P2P_KEY_HASH_SIZE + P2P_TOKEN_SIZE];
 	char text[2 * (P2P_KEY_HASH_SIZE + P2P_TOKEN_SIZE) + 1];
 
-	posix_random_bytes(p2p.token, sizeof(p2p.token));
+	/* DCE official server: HALO_DCE_INVITE_TOKEN (32 hex) keeps one invite across
+	restarts, so a client can pin it. Unset: a random token, as before. */
+	{
+		const char *fixed = getenv("HALO_DCE_INVITE_TOKEN");
+		int at, ok = fixed && strlen(fixed) == 2 * sizeof(p2p.token);
+		for (at = 0; ok && at < (int)sizeof(p2p.token); at++)
+		{
+			unsigned value;
+			ok = sscanf(fixed + 2 * at, "%2x", &value) == 1;
+			p2p.token[at] = (unsigned char)value;
+		}
+		if (!ok)
+			posix_random_bytes(p2p.token, sizeof(p2p.token));
+	}
 	p2p.has_token = 1;
 	p2p.token_listed = 0;
 	p2p_key_hash(p2p_public_key(), bytes);
