@@ -123,6 +123,9 @@ enum
 
 	/* milliseconds */
 	LOOP_INTERVAL = 10,
+	/* a modem peer's streams: KCP's normal mode, flushed every 100 ms, so
+	small reliable messages and their acks share packets */
+	SLOW_STREAM_INTERVAL = 100,
 	PUNCH_INTERVAL = 200,
 	PING_INTERVAL = 1000,
 	ENDPOINT_SWITCH_TIME = 3000,
@@ -222,6 +225,11 @@ struct peer
 	/* a public game's host probed for its ping (p2p_probe_start): none of
 	its traffic is the game's */
 	int probe;
+	/* DCE: every byte sent it on the wire (IP and UDP included) since the
+	netcode last took them (p2p_take_wire_bytes), and whether it is on a
+	modem line (p2p_set_slow_line: its streams batch) */
+	long wire_out;
+	int slow_line;
 };
 
 /* a UDP stand-in for one port of a peer */
@@ -925,6 +933,7 @@ static void peer_send_to(struct peer *peer, const struct p2p_candidate *to, cons
 	}
 	make_address(&address, to->address, to->port);
 	posix_socket_sendto(p2p.tunnel_socket, packet, TUNNEL_HEADER_SIZE + sealed, 0, &address, sizeof(address));
+	peer->wire_out += TUNNEL_HEADER_SIZE + sealed + WIRE_IP_UDP;
 	wire_note(peer, 0, inner, size, TUNNEL_HEADER_SIZE + sealed + WIRE_IP_UDP);
 }
 
@@ -2309,7 +2318,10 @@ static struct stream *stream_new(int peer_index, IUINT32 conversation)
 		stream->socket = -1;
 		stream->created_time = p2p_now();
 		ikcp_setoutput(stream->kcp, kcp_output);
-		ikcp_nodelay(stream->kcp, 1, LOOP_INTERVAL, 2, 1);
+		if (p2p.peers[peer_index].slow_line)
+			ikcp_nodelay(stream->kcp, 0, SLOW_STREAM_INTERVAL, 0, 0);
+		else
+			ikcp_nodelay(stream->kcp, 1, LOOP_INTERVAL, 2, 1);
 		ikcp_wndsize(stream->kcp, 256, 256);
 		ikcp_setmtu(stream->kcp, KCP_MTU);
 		return stream;
@@ -4072,4 +4084,36 @@ void p2p_initialize(unsigned long local_address)
 	p2p.running = 1;
 	if (command_line_invite(invite, sizeof(invite)))
 		p2p_join_invite(invite);
+}
+
+/* DCE official server: a modem client's line, by the address the game has for it */
+long p2p_take_wire_bytes(unsigned long game_address)
+{
+	struct peer *peer = find_peer_by_address(network_long(game_address));
+	long bytes;
+
+	if (!peer || !peer->connected)
+		return -1;
+	bytes = peer->wire_out;
+	peer->wire_out = 0;
+	return bytes;
+}
+
+void p2p_set_slow_line(unsigned long game_address)
+{
+	struct peer *peer = find_peer_by_address(network_long(game_address));
+	int index;
+
+	if (!peer || peer->slow_line)
+		return;
+	peer->slow_line = 1;
+	for (index = 0; index < MAXIMUM_STREAMS; index++)
+	{
+		struct stream *stream = &p2p.streams[index];
+
+		if (stream->used && stream->kcp && &p2p.peers[stream->peer] == peer)
+			ikcp_nodelay(stream->kcp, 0, SLOW_STREAM_INTERVAL, 0, 0);
+	}
+	platform_log("Internet play: %s is on a modem line: its streams batch every %d ms", peer->name,
+		(int)SLOW_STREAM_INTERVAL);
 }

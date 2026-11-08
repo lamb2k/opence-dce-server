@@ -698,10 +698,14 @@ static boolean distributed_client_build_known[HALO_PORT_MAXIMUM_NETWORK_MACHINES
 #define DCE_SLOW_WIRE_OVERHEAD 36 /* IP, UDP and tunnel bytes on each datagram */
 extern void (*transport_write_observer)(unsigned long address, long length);
 unsigned long network_distributed_machine_address(long machine_index);
+/* the tunnel's own count of a peer's wire bytes since the last call (-1: not a tunnel peer), and
+its batching for a modem peer (port/linux/src/p2p.c) */
+long p2p_take_wire_bytes(unsigned long game_address);
+void p2p_set_slow_line(unsigned long game_address);
 /* each modem client's address as the game writes to it (0: none), and how many there are */
 static unsigned long distributed_slow_addresses[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 static short distributed_slow_machine_count;
-#define DCE_SLOW_BUDGET_DEFAULT 2000 /* every byte written to it, resends included, of a 33.6k line's 3360 B/s */
+#define DCE_SLOW_BUDGET_DEFAULT 2000 /* wire bytes a second (IP and UDP included, the tunnel's count where it carries the client), of a 33.6k line's 3360 B/s */
 /* DCE official server: per modem client, a period that follows the bytes it is sent */
 static long distributed_slow_bytes[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 static long distributed_slow_window_start[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
@@ -772,11 +776,18 @@ static void distributed_slow_adapt(void)
 		}
 		distributed_slow_addresses[machine_index] = network_distributed_machine_address(machine_index);
 		slow_count++;
+		if (distributed_slow_addresses[machine_index])
+			p2p_set_slow_line(distributed_slow_addresses[machine_index]);
 		if (ticks < 0)
 			distributed_slow_window_start[machine_index] = now, distributed_slow_bytes[machine_index] = 0;
 		else if (ticks >= DCE_SLOW_WINDOW_TICKS)
 		{
-			long rate = distributed_slow_bytes[machine_index] * DCE_SLOW_WINDOW_TICKS / ticks;
+			/* (the tunnel's count where it carries the client: every byte on its
+			line, the reliable stream's, acks and resends too; else the game's
+			own writes) */
+			long wire = distributed_slow_addresses[machine_index] ?
+				p2p_take_wire_bytes(distributed_slow_addresses[machine_index]) : -1;
+			long rate = (wire >= 0 ? wire : distributed_slow_bytes[machine_index]) * DCE_SLOW_WINDOW_TICKS / ticks;
 			short period = distributed_machine_slow_period(machine_index);
 			long budget = distributed_slow_budget();
 
