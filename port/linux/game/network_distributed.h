@@ -156,6 +156,14 @@ enum
 	stream */
 	_distributed_message_map_vote = 94,
 	_distributed_message_map_vote_choice = 95,
+	/* network version 42 (dce_compact.h): the compact forms of the host's reliable object changes,
+	kills and game state, and of its per-tick unit and object states. They exist on the wire only;
+	network_reliable.c turns each back into the wide message the handlers read. */
+	_distributed_message_compact_object_changes = 96,
+	_distributed_message_compact_kills = 97,
+	_distributed_message_compact_game_state = 98,
+	_distributed_message_compact_unit_states = 99,
+	_distributed_message_compact_object_states = 100,
 
 	NUMBER_OF_DISTRIBUTED_MESSAGES
 };
@@ -248,6 +256,19 @@ a longer message is split where a batch is full */
 /* ... and one reliable message (its count a byte) */
 #define RELIABLE_ENTRIES(type) \
 	((short)MIN(255, (MAXIMUM_MESSAGE_SIZE - sizeof(struct distributed_message_header)) / sizeof(type)))
+
+/* ---------- prototypes/NETWORK_RELIABLE.C (network version 42) */
+
+/* (the host) a message to a machine in the game over its stream: compact, and paced if its line is slow */
+boolean network_reliable_send(long machine_index, void *message, word size);
+/* (the host) once a tick: the paced objects of the slow lines go out as their streams have room */
+void network_reliable_pump(void);
+/* (the host) a machine is sent the host's objects all over: its compact forms start afresh */
+void network_reliable_machine_sync(long machine_index);
+/* a game begins: nothing built up of the last */
+void network_reliable_new_game(void);
+/* (a client) a compact message of the host's as the wide one the handlers read: its size, 0 if it is bad */
+word network_reliable_expand(void const *message, word size, void *out, word capacity);
 
 /* ---------- prototypes/NETWORK_DISTRIBUTED.C */
 

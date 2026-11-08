@@ -129,6 +129,14 @@ enum
 	SLOW_LINE_HOLD = 2000,
 	/* a modem peer's stream pieces: small, so one lost piece costs little */
 	SLOW_KCP_MTU = 524,
+	/* a modem peer's streams send at most this many pieces ahead (its own receive window is 3 to 4),
+	wait at least this long (ms) before sending a piece again, and give up on the line only after
+	this many tries: a window of 256 let a whole backlog out at once, KCP's 30 ms floor sent each
+	piece again long before its acknowledgement could come back over a 900 ms line, and 20 tries
+	of that ended the stream (the console dropped at the match end) */
+	SLOW_KCP_WINDOW = 8,
+	SLOW_KCP_MIN_RTO = 1000,
+	SLOW_KCP_DEAD_LINK = 60,
 	/* a modem peer's whole wire (every kind), bytes a second, and the burst it may take */
 	SLOW_WIRE_RATE_DEFAULT = 2400,
 	SLOW_WIRE_DEPTH = 600,
@@ -942,6 +950,12 @@ static long slow_wire_rate(void)
 			rate = 800;
 	}
 	return rate;
+}
+
+/* DCE official server: a modem peer's wire rate, bytes a second (the netcode paces its streams by it) */
+long p2p_slow_wire_rate(void)
+{
+	return slow_wire_rate();
 }
 
 /* a modem peer's bucket, filled to now */
@@ -2427,6 +2441,26 @@ static int kcp_output(const char *buffer, int size, ikcpcb *kcp, void *user)
 	return 0;
 }
 
+/* a stream's KCP for the peer's line: a modem's, or a broadband peer's */
+static void stream_tune(ikcpcb *kcp, int slow)
+{
+	if (slow)
+	{
+		/* (no fast resend on duplicate acknowledgements: on a modem line those are queueing, not loss) */
+		ikcp_nodelay(kcp, 1, SLOW_STREAM_INTERVAL, 0, 1);
+		kcp->rx_minrto = SLOW_KCP_MIN_RTO;
+		kcp->snd_wnd = SLOW_KCP_WINDOW;
+		kcp->dead_link = SLOW_KCP_DEAD_LINK;
+	}
+	else
+	{
+		ikcp_nodelay(kcp, 1, LOOP_INTERVAL, 2, 1);
+		ikcp_wndsize(kcp, 256, 256);
+		kcp->dead_link = 20; /* (KCP's own) */
+	}
+	ikcp_setmtu(kcp, slow ? SLOW_KCP_MTU : KCP_MTU);
+}
+
 static struct stream *stream_new(int peer_index, IUINT32 conversation)
 {
 	int index;
@@ -2449,12 +2483,7 @@ static struct stream *stream_new(int peer_index, IUINT32 conversation)
 		stream->socket = -1;
 		stream->created_time = p2p_now();
 		ikcp_setoutput(stream->kcp, kcp_output);
-		if (p2p.peers[peer_index].slow_line)
-			ikcp_nodelay(stream->kcp, 1, SLOW_STREAM_INTERVAL, 2, 1);
-		else
-			ikcp_nodelay(stream->kcp, 1, LOOP_INTERVAL, 2, 1);
-		ikcp_wndsize(stream->kcp, 256, 256);
-		ikcp_setmtu(stream->kcp, p2p.peers[peer_index].slow_line ? SLOW_KCP_MTU : KCP_MTU);
+		stream_tune(stream->kcp, p2p.peers[peer_index].slow_line);
 		return stream;
 	}
 	return NULL;
@@ -4243,11 +4272,7 @@ static void peer_set_slow_streams(struct peer *peer, int slow)
 
 		if (stream->used && stream->kcp && &p2p.peers[stream->peer] == peer)
 		{
-			if (slow)
-				ikcp_nodelay(stream->kcp, 1, SLOW_STREAM_INTERVAL, 2, 1);
-			else
-				ikcp_nodelay(stream->kcp, 1, LOOP_INTERVAL, 2, 1);
-			ikcp_setmtu(stream->kcp, slow ? SLOW_KCP_MTU : KCP_MTU);
+			stream_tune(stream->kcp, slow);
 		}
 	}
 	if (slow)
@@ -4321,6 +4346,34 @@ long p2p_queued_bytes(unsigned long game_address)
 
 		if (stream->used && stream->kcp && &p2p.peers[stream->peer] == peer)
 			bytes += (long)ikcp_waitsnd(stream->kcp) * (long)stream->kcp->mss;
+	}
+	return bytes;
+}
+
+/* DCE official server: the reliable bytes to a peer not yet sent once: the game's writes the
+tunnel has not read, and KCP's queue behind its window (-1: not a tunnel peer). What is out
+on the line waiting for its acknowledgement is not counted: a line at its speed always has
+a round trip of it. */
+long p2p_unsent_bytes(unsigned long game_address)
+{
+	struct peer *peer = find_peer_by_address(network_long(game_address));
+	long bytes = 0;
+	int index;
+
+	if (!peer || !peer->connected)
+		return -1;
+	for (index = 0; index < MAXIMUM_STREAMS; index++)
+	{
+		struct stream *stream = &p2p.streams[index];
+
+		if (stream->used && stream->kcp && &p2p.peers[stream->peer] == peer)
+		{
+			posix_ulong available = 0;
+
+			bytes += (long)stream->kcp->nsnd_que * (long)stream->kcp->mss;
+			if (stream->socket >= 0 && posix_socket_bytes_available(stream->socket, &available) == 0)
+				bytes += (long)available;
+		}
 	}
 	return bytes;
 }

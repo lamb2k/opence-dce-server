@@ -1300,6 +1300,8 @@ void network_objects_client_asked(
 		return;
 	}
 	distributed_host_update_objects();
+	/* (network version 42: its compact forms begin afresh with these) */
+	network_reliable_machine_sync(machine_index);
 	for (absolute_index = 0; absolute_index < objects_host_told_count; absolute_index++)
 	{
 		/* (what every unit carries, with the next of them) */

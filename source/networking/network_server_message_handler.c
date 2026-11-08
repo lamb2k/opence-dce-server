@@ -951,9 +951,22 @@ unsigned long network_distributed_machine_address(
 	return address.address.long_words[0];
 }
 
+/* DCE network version 42: network_reliable.c turns each message into its compact form and
+paces it to a slow line */
+boolean network_reliable_send(long machine_index, void *message, word size);
+
 /* reliably to one machine in the game (the host's objects, to a client
 that has loaded) */
 boolean network_distributed_server_send_to_machine_reliably(
+	long machine_index,
+	void *message,
+	word size)
+{
+	return network_reliable_send(machine_index, message, size);
+}
+
+/* ... the bytes as they are to go on its stream (network_reliable.c's writes) */
+boolean network_distributed_server_write_machine_reliably(
 	long machine_index,
 	void *message,
 	word size)
@@ -1003,7 +1016,7 @@ boolean network_distributed_server_send_to_all_reliably(
 			if (connection && network_connection_active(connection) && size <= sizeof(buffer))
 			{
 				csmemcpy(buffer, message, size);
-				result &= network_game_server_write(connection, buffer, size, NULL, 1);
+				result &= network_reliable_send(machine_index, buffer, size);
 			}
 		}
 	}

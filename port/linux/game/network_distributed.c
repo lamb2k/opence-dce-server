@@ -3938,6 +3938,7 @@ void network_distributed_new_game(
 	short player_index;
 
 	distributed_last_sent_time = NONE;
+	network_reliable_new_game();
 	csmemset(distributed_deaths, 0, sizeof(distributed_deaths));
 	csmemset(distributed_seat_disagreements, 0, sizeof(distributed_seat_disagreements));
 	csmemset(distributed_predictions, 0, sizeof(distributed_predictions));
@@ -4109,6 +4110,8 @@ void network_distributed_tick(
 	are timed by it) */
 	distributed_tick_sent_times[game_time_get() & (TICK_SENT_TIMES - 1)].time = game_time_get();
 	distributed_tick_sent_times[game_time_get() & (TICK_SENT_TIMES - 1)].milliseconds = system_milliseconds();
+	if (connection == _game_connection_network_server)
+		network_reliable_pump();
 	profile_scope(distributed_tick_batches_flush_section, distributed_batches_flush();)
 	distributed_machines.in_tick = FALSE;
 	distributed_machines.valid = FALSE;
@@ -4981,6 +4984,18 @@ void network_distributed_handle_message(
 				distributed_handling_batch = FALSE;
 			}
 		}
+		return;
+	}
+	/* (network version 42: a compact form, which is the wide message again when read) */
+	if (header.type >= _distributed_message_compact_object_changes &&
+		header.type <= _distributed_message_compact_object_states)
+	{
+		word expanded[(MAXIMUM_MESSAGE_SIZE + sizeof(word)) / sizeof(word)];
+		word expanded_size = machine_index == NONE ?
+			network_reliable_expand(message, size, expanded, (word)sizeof(expanded)) : 0;
+
+		if (expanded_size)
+			network_distributed_handle_message(machine_index, expanded, expanded_size);
 		return;
 	}
 	/* (entries of a size of their own: their least here, and each read no
