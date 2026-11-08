@@ -1117,50 +1117,51 @@ enum
 static boolean network_game_settings_update_pending = FALSE;
 static unsigned long network_game_settings_update_time = 0;
 
-boolean network_game_server_send_game_settings_to_all_machines(
+/* DCE: which machines missed the latest settings (a write refused: on a modem
+line, its stream still full of an earlier copy). Only those are sent it again,
+the latest settings in place of the refused copy; a machine that took it is
+not sent another full copy for someone else's miss. */
+static boolean network_game_settings_machine_pending[MAXIMUM_NETWORK_MACHINE_COUNT];
+
+static boolean network_game_server_send_game_settings_to_machines(
 	struct network_game_server *server,
 	void const *game,
-	long game_size)
+	long game_size,
+	boolean only_pending)
 {
-	struct message_server_game_settings_update message;
-	long offset;
 	boolean result = TRUE;
+	long machine_index;
 
 	match_assert(
 		"c:\\halo\\SOURCE\\networking\\network_server_message_handler.c",
 		0x1C8,
 		server);
 
-	/* every piece goes out even if one fails for a machine: the others
-	would otherwise keep the old settings (a machine whose connection failed
-	is closed, and is skipped when the update is sent again) */
-	for (offset = 0; offset < game_size; offset += sizeof(message.data))
+	for (machine_index = 0; machine_index < MAXIMUM_NETWORK_MACHINE_COUNT; machine_index++)
 	{
-		void *encoded_message;
+		struct network_game_server_client_machine *machine =
+			network_game_server_get_client_machine_at_index(server, machine_index);
+		struct network_connection *connection;
 
-		message.total_size = (word)game_size;
-		message.offset = (word)offset;
-		message.length = (word)MIN((long)sizeof(message.data), game_size - offset);
-		message.pad = 0;
-		csmemset(message.data, 0, sizeof(message.data));
-		csmemcpy(message.data, (byte const *)game + offset, message.length);
-		encoded_message = create_network_game_message(
-			_message_server_game_settings_update,
-			&message,
-			sizeof(message));
-		if (encoded_message)
+		if (!network_game_server_client_machine_is_joined_to_game(server, machine) ||
+			network_game_server_machine_is_loading_late(server, machine))
 		{
-			/* (a piece that failed stays failed: the next is no retry of it) */
-			if (!network_game_server_send_message_to_all_machines(server, encoded_message))
-			{
-				network_event(
-					"failed to send message_server_game_settings_update message to all machines");
-				result = FALSE;
-			}
+			network_game_settings_machine_pending[machine_index] = FALSE;
+			continue;
 		}
-		else
+		connection = network_game_server_get_client_connection(machine);
+		if (!connection || !network_connection_active(connection))
 		{
-			network_event("failed to create a message_server_game_settings_update message");
+			network_game_settings_machine_pending[machine_index] = FALSE;
+			continue;
+		}
+		if (only_pending && !network_game_settings_machine_pending[machine_index])
+			continue;
+		network_game_settings_machine_pending[machine_index] =
+			!network_game_server_send_game_settings_to_client_machine(server, machine, game, game_size);
+		if (network_game_settings_machine_pending[machine_index])
+		{
+			network_event("a machine missed the game settings update; it alone is sent the latest again");
 			result = FALSE;
 		}
 	}
@@ -1169,6 +1170,14 @@ boolean network_game_server_send_game_settings_to_all_machines(
 	network_game_settings_update_time = system_milliseconds();
 
 	return result;
+}
+
+boolean network_game_server_send_game_settings_to_all_machines(
+	struct network_game_server *server,
+	void const *game,
+	long game_size)
+{
+	return network_game_server_send_game_settings_to_machines(server, game, game_size, FALSE);
 }
 
 boolean network_game_server_flush_game_data_pregame(
@@ -1183,7 +1192,7 @@ boolean network_game_server_flush_game_data_pregame(
 
 		if (game)
 		{
-			result = network_game_server_send_game_settings_to_all_machines(server, game, sizeof(*game));
+			result = network_game_server_send_game_settings_to_machines(server, game, sizeof(*game), TRUE);
 		}
 		else
 		{
@@ -1200,6 +1209,11 @@ boolean network_game_server_flush_game_data_pregame(
 boolean network_game_server_send_game_data_pregame(
 	struct network_game_server *server)
 {
+	long machine_index;
+
+	/* (a send asked for: every machine) */
+	for (machine_index = 0; machine_index < MAXIMUM_NETWORK_MACHINE_COUNT; machine_index++)
+		network_game_settings_machine_pending[machine_index] = TRUE;
 	network_game_settings_update_pending = TRUE;
 
 	return network_game_server_flush_game_data_pregame(server);
