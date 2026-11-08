@@ -957,6 +957,15 @@ static long peer_wire_tokens(struct peer *peer)
 	return peer->wire_tokens;
 }
 
+/* a stream may take more of the game's bytes: not a modem peer's whose
+line is full (its bucket below empty), so the stream stays inside the wire too */
+static int stream_line_open(struct stream *stream)
+{
+	struct peer *peer = &p2p.peers[stream->peer];
+
+	return !peer->slow_line || peer_wire_tokens(peer) > 0;
+}
+
 static void peer_send_to(struct peer *peer, const struct p2p_candidate *to, const unsigned char *inner, int size)
 {
 	unsigned char packet[MAXIMUM_PACKET_SIZE];
@@ -2676,7 +2685,8 @@ static void stream_readable(struct stream *stream)
 	unsigned char buffer[STREAM_CHUNK_SIZE];
 	int count;
 
-	for (count = 0; count < 8 && ikcp_waitsnd(stream->kcp) < STREAM_WINDOW && stream->socket >= 0; count++)
+	for (count = 0; count < 8 && ikcp_waitsnd(stream->kcp) < STREAM_WINDOW && stream->socket >= 0 &&
+		stream_line_open(stream); count++)
 	{
 		int size = posix_socket_recv(stream->socket, buffer, sizeof(buffer), 0);
 
@@ -3978,7 +3988,8 @@ static void *p2p_thread(void *unused)
 				continue;
 			/* (not while the tunnel's window is full, which stream_readable
 			waits out, or the wait would return at once) */
-			if (stream->state == _stream_open_state && ikcp_waitsnd(stream->kcp) < STREAM_WINDOW)
+			if (stream->state == _stream_open_state && ikcp_waitsnd(stream->kcp) < STREAM_WINDOW &&
+				stream_line_open(stream))
 			{
 				read_owners[read_count] = _owner_stream | index << 8;
 				read[read_count++] = stream->socket;
