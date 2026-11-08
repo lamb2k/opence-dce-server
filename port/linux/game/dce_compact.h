@@ -101,4 +101,101 @@ size_t dce_put_varint(uint8_t *out, uint32_t value);
 /* bytes read, 0 on error */
 size_t dce_get_varint(uint8_t const *in, size_t size, uint32_t *value);
 
+/* ---------- datagram states and actions (step 2): what the host sends each tick, delta coded per
+machine. A unit's or an object's record is a whole one (a key) or the difference from the last
+record sent to that machine for it (a delta, naming that record's number), and the client holds
+the last it took for each. A delta whose base the client does not have (a datagram lost, or an
+object it has not made yet) is dropped, and the client asks for keys in its next input; the host
+sends a key every DCE_KEY_INTERVAL records whatever it hears, so a loss costs a second at most.
+Positions are 1/256 world unit, orientations the 4 byte form of the object changes. */
+
+#define DCE_KEY_INTERVAL 10
+#ifndef DCE_UNIT_CHAINS
+#define DCE_UNIT_CHAINS 128 /* player indices the codec follows */
+#endif
+
+/* the legacy unit state's flag and part bits */
+enum
+{
+	DCE_UNIT_ALIVE = 1,
+	DCE_UNIT_PLACED = 2,
+	DCE_UNIT_PREDICTED = 128,
+	DCE_PART_RIDING = 1,
+	DCE_PART_UP = 2,
+	DCE_PART_DAMAGE = 4,
+	DCE_PART_POWERUPS = 8,
+	DCE_PART_CAMOUFLAGE = 16,
+	DCE_PART_KILLER = 32
+};
+
+struct dce_unit
+{
+	uint8_t player, flags, parts, killer, unit_flags, camouflage;
+	uint16_t unit_abs; /* the absolute index of the unit's object: the receiver has the full index */
+	uint16_t vehicle_abs;
+	int16_t seat;
+	int32_t position[3]; /* 1/256 world unit */
+	int16_t velocity[3], forward[3], up[3];
+	int16_t predicted;
+	uint16_t body, shield, damage[4];
+	int16_t powerups[2];
+};
+
+struct dce_unit_chain
+{
+	uint8_t valid, seq, since_key;
+	struct dce_unit state;
+};
+
+/* the bytes written (at most DCE_UNIT_MAX_BYTES) */
+#define DCE_UNIT_MAX_BYTES 64
+size_t dce_unit_encode(struct dce_unit_chain *chain, int force_key, struct dce_unit const *unit, uint8_t *out, size_t cap);
+/* the bytes read, 0 if malformed. *status: 1 = `unit` is the state, 0 = a delta whose base is not held (dropped; ask for keys) */
+size_t dce_unit_decode(struct dce_unit_chain *chains, size_t chain_count, uint8_t const *in, size_t size,
+	struct dce_unit *unit, int *status);
+
+struct dce_object
+{
+	uint16_t object_abs;
+	uint8_t flags;
+	int16_t time;
+	int32_t position[3]; /* 1/256 world unit */
+	uint32_t axes; /* forward and up in 4 bytes */
+	int16_t velocity[3], angular_velocity[3];
+};
+
+struct dce_object_chain
+{
+	uint8_t valid, seq, since_key;
+	struct dce_object state;
+};
+
+#define DCE_OBJECT_MAX_BYTES 40
+size_t dce_object_encode(struct dce_object_chain *chain, int force_key, struct dce_object const *object, uint8_t *out,
+	size_t cap);
+/* the chain is looked up by the caller from the record's index: call dce_object_peek first */
+int dce_object_peek(uint8_t const *in, size_t size, uint16_t *object_abs);
+size_t dce_object_decode(struct dce_object_chain *chain, uint8_t const *in, size_t size, struct dce_object *object,
+	int *status);
+
+/* axes: forward and up (unit vectors, any length) as the 4 bytes, and back */
+uint32_t dce_axes_pack(float const forward[3], float const up[3]);
+void dce_axes_unpack(uint32_t axes, float forward[3], float up[3]);
+int32_t dce_position_quantize(float value);
+float dce_position_dequantize(int32_t value);
+
+/* a relayed action (no chain: each is whole) */
+struct dce_action
+{
+	uint8_t player;
+	int8_t weapon, grenade, zoom, throttle_i, throttle_j;
+	uint8_t trigger;
+	int16_t yaw, pitch;
+	uint16_t flags[4];
+};
+
+#define DCE_ACTION_MAX_BYTES 20
+size_t dce_action_encode(struct dce_action const *action, uint8_t *out, size_t cap);
+size_t dce_action_decode(uint8_t const *in, size_t size, struct dce_action *action);
+
 #endif

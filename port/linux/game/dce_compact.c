@@ -639,3 +639,805 @@ int dce_state_decode(uint8_t *state, size_t *size, size_t capacity, uint8_t cons
 		return p == end;
 	}
 }
+
+/* ---------- datagram states and actions */
+
+uint32_t dce_axes_pack(float const forward[3], float const up[3])
+{
+	return axes_pack(forward, up);
+}
+
+void dce_axes_unpack(uint32_t axes, float forward[3], float up[3])
+{
+	axes_unpack(axes, forward, up);
+}
+
+int32_t dce_position_quantize(float value)
+{
+	return clamp_round(value, POSITION_SCALE, 8388607);
+}
+
+float dce_position_dequantize(int32_t value)
+{
+	return (float)value / POSITION_SCALE;
+}
+
+static void put_s16(uint8_t *p, int16_t v)
+{
+	put16(p, (uint16_t)v);
+}
+
+static int16_t get_s16(uint8_t const *p)
+{
+	return (int16_t)get16(p);
+}
+
+/* unit record heads: the player (0..127), with 0x80 for a delta */
+enum
+{
+	UNIT_DELTA = 0x80,
+	UD_POSITION = 1 << 0,
+	UD_VELOCITY = 1 << 1,
+	UD_FORWARD = 1 << 2,
+	UD_UP = 1 << 3,
+	UD_VITALITY = 1 << 4,
+	UD_TAIL = 1 << 5,
+	UD_PREDICTED = 1 << 6
+};
+
+static size_t unit_tail_size(uint8_t parts)
+{
+	return (size_t)((parts & DCE_PART_DAMAGE ? 8 : 0) + (parts & DCE_PART_POWERUPS ? 4 : 0) +
+		(parts & DCE_PART_CAMOUFLAGE ? 2 : 0));
+}
+
+static uint8_t *unit_put_tail(uint8_t *p, struct dce_unit const *u)
+{
+	int i;
+
+	if (u->parts & DCE_PART_DAMAGE)
+	{
+		for (i = 0; i < 4; i++, p += 2)
+			put16(p, u->damage[i]);
+	}
+	if (u->parts & DCE_PART_POWERUPS)
+	{
+		for (i = 0; i < 2; i++, p += 2)
+			put_s16(p, u->powerups[i]);
+	}
+	if (u->parts & DCE_PART_CAMOUFLAGE)
+	{
+		p[0] = u->unit_flags;
+		p[1] = u->camouflage;
+		p += 2;
+	}
+	return p;
+}
+
+static uint8_t const *unit_get_tail(uint8_t const *p, struct dce_unit *u)
+{
+	int i;
+
+	if (u->parts & DCE_PART_DAMAGE)
+	{
+		for (i = 0; i < 4; i++, p += 2)
+			u->damage[i] = get16(p);
+	}
+	else
+		memset(u->damage, 0, sizeof(u->damage));
+	if (u->parts & DCE_PART_POWERUPS)
+	{
+		for (i = 0; i < 2; i++, p += 2)
+			u->powerups[i] = get_s16(p);
+	}
+	else
+		memset(u->powerups, 0, sizeof(u->powerups));
+	if (u->parts & DCE_PART_CAMOUFLAGE)
+	{
+		u->unit_flags = p[0];
+		u->camouflage = p[1];
+		p += 2;
+	}
+	else
+	{
+		u->unit_flags = 0;
+		u->camouflage = 0;
+	}
+	return p;
+}
+
+static int unit_delta_ok(struct dce_unit_chain const *chain, struct dce_unit const *u)
+{
+	struct dce_unit const *b = &chain->state;
+	int i;
+
+	if (!chain->valid || chain->since_key >= DCE_KEY_INTERVAL)
+		return 0;
+	if (!(b->flags & DCE_UNIT_ALIVE) || !(u->flags & DCE_UNIT_ALIVE) || b->unit_abs != u->unit_abs ||
+		((b->flags ^ u->flags) & DCE_UNIT_PLACED) || ((b->parts ^ u->parts) & (DCE_PART_RIDING | DCE_PART_UP)) ||
+		((u->parts & DCE_PART_RIDING) && (b->vehicle_abs != u->vehicle_abs || b->seat != u->seat)))
+		return 0;
+	for (i = 0; i < 3; i++)
+	{
+		int32_t d = u->position[i] - b->position[i];
+
+		if (d > 32767 || d < -32767)
+			return 0;
+	}
+	return 1;
+}
+
+size_t dce_unit_encode(struct dce_unit_chain *chain, int force_key, struct dce_unit const *u, uint8_t *out, size_t cap)
+{
+	uint8_t *p = out;
+	int i;
+
+	if (cap < DCE_UNIT_MAX_BYTES || u->player >= 128)
+		return 0;
+	if (!force_key && unit_delta_ok(chain, u))
+	{
+		struct dce_unit const *b = &chain->state;
+		uint8_t mask = 0;
+		uint8_t *mask_at;
+
+		*p++ = (uint8_t)(u->player | UNIT_DELTA);
+		*p++ = chain->seq; /* the base */
+		mask_at = p++;
+		if (u->flags & DCE_UNIT_PLACED)
+		{
+			if (memcmp(u->position, b->position, sizeof(u->position)) != 0)
+			{
+				mask |= UD_POSITION;
+				for (i = 0; i < 3; i++, p += 2)
+					put_s16(p, (int16_t)(u->position[i] - b->position[i]));
+			}
+			if (memcmp(u->velocity, b->velocity, sizeof(u->velocity)) != 0)
+			{
+				mask |= UD_VELOCITY;
+				for (i = 0; i < 3; i++, p += 2)
+					put_s16(p, u->velocity[i]);
+			}
+			if (memcmp(u->forward, b->forward, sizeof(u->forward)) != 0)
+			{
+				mask |= UD_FORWARD;
+				for (i = 0; i < 3; i++, p += 2)
+					put_s16(p, u->forward[i]);
+			}
+			if ((u->parts & DCE_PART_UP) && memcmp(u->up, b->up, sizeof(u->up)) != 0)
+			{
+				mask |= UD_UP;
+				for (i = 0; i < 3; i++, p += 2)
+					put_s16(p, u->up[i]);
+			}
+		}
+		if (u->body != b->body || u->shield != b->shield)
+		{
+			mask |= UD_VITALITY;
+			put16(p, u->body);
+			put16(p + 2, u->shield);
+			p += 4;
+		}
+		if (u->flags != b->flags || u->parts != b->parts || memcmp(u->damage, b->damage, sizeof(u->damage)) != 0 ||
+			memcmp(u->powerups, b->powerups, sizeof(u->powerups)) != 0 || u->unit_flags != b->unit_flags ||
+			u->camouflage != b->camouflage)
+		{
+			mask |= UD_TAIL;
+			*p++ = u->flags;
+			*p++ = u->parts;
+			p = unit_put_tail(p, u);
+		}
+		if ((u->flags & DCE_UNIT_PREDICTED) && u->predicted != b->predicted)
+		{
+			mask |= UD_PREDICTED;
+			put_s16(p, u->predicted);
+			p += 2;
+		}
+		*mask_at = mask;
+		chain->seq = (uint8_t)(chain->seq + 1);
+		chain->since_key++;
+		chain->state = *u;
+		return (size_t)(p - out);
+	}
+	/* a key */
+	*p++ = u->player;
+	chain->seq = (uint8_t)(chain->seq + 1);
+	*p++ = chain->seq;
+	*p++ = u->flags;
+	*p++ = u->parts;
+	if (u->flags & DCE_UNIT_ALIVE)
+	{
+		put16(p, u->unit_abs);
+		p += 2;
+		if (u->parts & DCE_PART_RIDING)
+		{
+			put16(p, u->vehicle_abs);
+			put_s16(p + 2, u->seat);
+			p += 4;
+		}
+		if (u->flags & DCE_UNIT_PLACED)
+		{
+			for (i = 0; i < 3; i++, p += 3)
+				put24(p, u->position[i]);
+			for (i = 0; i < 3; i++, p += 2)
+				put_s16(p, u->velocity[i]);
+			for (i = 0; i < 3; i++, p += 2)
+				put_s16(p, u->forward[i]);
+			if (u->parts & DCE_PART_UP)
+			{
+				for (i = 0; i < 3; i++, p += 2)
+					put_s16(p, u->up[i]);
+			}
+		}
+		if (u->flags & DCE_UNIT_PREDICTED)
+		{
+			put_s16(p, u->predicted);
+			p += 2;
+		}
+		put16(p, u->body);
+		put16(p + 2, u->shield);
+		p += 4;
+		p = unit_put_tail(p, u);
+	}
+	else if (u->parts & DCE_PART_KILLER)
+		*p++ = u->killer;
+	chain->since_key = 0;
+	chain->valid = 1;
+	chain->state = *u;
+	return (size_t)(p - out);
+}
+
+size_t dce_unit_decode(struct dce_unit_chain *chains, size_t chain_count, uint8_t const *in, size_t size,
+	struct dce_unit *unit, int *status)
+{
+	uint8_t const *p = in;
+	uint8_t const *end = in + size;
+	uint8_t head;
+	struct dce_unit_chain *chain;
+	int i;
+
+	if (size < 4)
+		return 0;
+	head = *p++;
+	chain = (size_t)(head & 0x7F) < chain_count ? &chains[head & 0x7F] : NULL;
+	if (head & UNIT_DELTA)
+	{
+		uint8_t base = *p++;
+		uint8_t mask = *p++;
+		struct dce_unit u;
+		int usable = chain && chain->valid && chain->seq == base;
+
+		if (usable)
+			u = chain->state;
+		else
+			memset(&u, 0, sizeof(u));
+		if (mask & UD_POSITION)
+		{
+			if (end - p < 6)
+				return 0;
+			for (i = 0; i < 3; i++, p += 2)
+				u.position[i] += get_s16(p);
+		}
+		if (mask & UD_VELOCITY)
+		{
+			if (end - p < 6)
+				return 0;
+			for (i = 0; i < 3; i++, p += 2)
+				u.velocity[i] = get_s16(p);
+		}
+		if (mask & UD_FORWARD)
+		{
+			if (end - p < 6)
+				return 0;
+			for (i = 0; i < 3; i++, p += 2)
+				u.forward[i] = get_s16(p);
+		}
+		if (mask & UD_UP)
+		{
+			if (end - p < 6)
+				return 0;
+			for (i = 0; i < 3; i++, p += 2)
+				u.up[i] = get_s16(p);
+		}
+		if (mask & UD_VITALITY)
+		{
+			if (end - p < 4)
+				return 0;
+			u.body = get16(p);
+			u.shield = get16(p + 2);
+			p += 4;
+		}
+		if (mask & UD_TAIL)
+		{
+			if (end - p < 2)
+				return 0;
+			u.flags = p[0];
+			u.parts = p[1];
+			p += 2;
+			if ((size_t)(end - p) < unit_tail_size(u.parts))
+				return 0;
+			p = unit_get_tail(p, &u);
+		}
+		if (mask & UD_PREDICTED)
+		{
+			if (end - p < 2)
+				return 0;
+			u.predicted = get_s16(p);
+			p += 2;
+		}
+		if (!usable)
+		{
+			*status = 0;
+			return (size_t)(p - in);
+		}
+		u.player = head & 0x7F;
+		chain->seq = (uint8_t)(base + 1);
+		chain->since_key++;
+		chain->state = u;
+		*unit = u;
+		*status = 1;
+		return (size_t)(p - in);
+	}
+	{
+		struct dce_unit u;
+		uint8_t seq;
+
+		memset(&u, 0, sizeof(u));
+		u.player = head;
+		u.killer = 255;
+		u.seat = -1;
+		seq = *p++;
+		u.flags = *p++;
+		u.parts = *p++;
+		if (u.flags & DCE_UNIT_ALIVE)
+		{
+			if (end - p < 2)
+				return 0;
+			u.unit_abs = get16(p);
+			p += 2;
+			if (u.parts & DCE_PART_RIDING)
+			{
+				if (end - p < 4)
+					return 0;
+				u.vehicle_abs = get16(p);
+				u.seat = get_s16(p + 2);
+				p += 4;
+			}
+			if (u.flags & DCE_UNIT_PLACED)
+			{
+				size_t need = 9 + 6 + 6 + ((u.parts & DCE_PART_UP) ? 6 : 0);
+
+				if ((size_t)(end - p) < need)
+					return 0;
+				for (i = 0; i < 3; i++, p += 3)
+					u.position[i] = get24(p);
+				for (i = 0; i < 3; i++, p += 2)
+					u.velocity[i] = get_s16(p);
+				for (i = 0; i < 3; i++, p += 2)
+					u.forward[i] = get_s16(p);
+				if (u.parts & DCE_PART_UP)
+				{
+					for (i = 0; i < 3; i++, p += 2)
+						u.up[i] = get_s16(p);
+				}
+			}
+			if (!(u.parts & DCE_PART_UP))
+				u.up[2] = 32767;
+			if (u.flags & DCE_UNIT_PREDICTED)
+			{
+				if (end - p < 2)
+					return 0;
+				u.predicted = get_s16(p);
+				p += 2;
+			}
+			if (end - p < 4)
+				return 0;
+			u.body = get16(p);
+			u.shield = get16(p + 2);
+			p += 4;
+			if ((size_t)(end - p) < unit_tail_size(u.parts))
+				return 0;
+			p = unit_get_tail(p, &u);
+		}
+		else if (u.parts & DCE_PART_KILLER)
+		{
+			if (end - p < 1)
+				return 0;
+			u.killer = *p++;
+		}
+		if (chain)
+		{
+			chain->valid = 1;
+			chain->seq = seq;
+			chain->since_key = 0;
+			chain->state = u;
+		}
+		*unit = u;
+		*status = chain ? 1 : 0;
+		return (size_t)(p - in);
+	}
+}
+
+/* object state records: the index with 0x8000 for a delta */
+enum
+{
+	OBJECT_DELTA = 0x8000,
+	OK_VELOCITY = 1 << 0,
+	OK_ANGULAR = 1 << 1,
+	OK_TIME = 1 << 2,
+	OD_POSITION = 1 << 0,
+	OD_AXES = 1 << 1,
+	OD_VELOCITY = 1 << 2,
+	OD_ANGULAR = 1 << 3,
+	OD_FLAGS = 1 << 4,
+	OD_TIME = 1 << 5
+};
+
+int dce_object_peek(uint8_t const *in, size_t size, uint16_t *object_abs)
+{
+	if (size < 2)
+		return 0;
+	*object_abs = (uint16_t)(get16(in) & 0x7FFF);
+	return 1;
+}
+
+static int object_delta_ok(struct dce_object_chain const *chain, struct dce_object const *o)
+{
+	int i;
+
+	if (!chain->valid || chain->since_key >= DCE_KEY_INTERVAL)
+		return 0;
+	for (i = 0; i < 3; i++)
+	{
+		int32_t d = o->position[i] - chain->state.position[i];
+
+		if (d > 32767 || d < -32767)
+			return 0;
+	}
+	return 1;
+}
+
+size_t dce_object_encode(struct dce_object_chain *chain, int force_key, struct dce_object const *o, uint8_t *out,
+	size_t cap)
+{
+	uint8_t *p = out;
+	int i;
+
+	if (cap < DCE_OBJECT_MAX_BYTES || o->object_abs >= 0x8000)
+		return 0;
+	if (!force_key && object_delta_ok(chain, o))
+	{
+		struct dce_object const *b = &chain->state;
+		uint8_t mask = 0;
+		uint8_t *mask_at;
+
+		put16(p, (uint16_t)(o->object_abs | OBJECT_DELTA));
+		p += 2;
+		*p++ = chain->seq;
+		mask_at = p++;
+		if (memcmp(o->position, b->position, sizeof(o->position)) != 0)
+		{
+			mask |= OD_POSITION;
+			for (i = 0; i < 3; i++, p += 2)
+				put_s16(p, (int16_t)(o->position[i] - b->position[i]));
+		}
+		if (o->axes != b->axes)
+		{
+			mask |= OD_AXES;
+			put32(p, o->axes);
+			p += 4;
+		}
+		if (memcmp(o->velocity, b->velocity, sizeof(o->velocity)) != 0)
+		{
+			mask |= OD_VELOCITY;
+			for (i = 0; i < 3; i++, p += 2)
+				put_s16(p, o->velocity[i]);
+		}
+		if (memcmp(o->angular_velocity, b->angular_velocity, sizeof(o->angular_velocity)) != 0)
+		{
+			mask |= OD_ANGULAR;
+			for (i = 0; i < 3; i++, p += 2)
+				put_s16(p, o->angular_velocity[i]);
+		}
+		if (o->flags != b->flags)
+		{
+			mask |= OD_FLAGS;
+			*p++ = o->flags;
+		}
+		if (o->time != b->time)
+		{
+			mask |= OD_TIME;
+			put_s16(p, o->time);
+			p += 2;
+		}
+		*mask_at = mask;
+		chain->seq = (uint8_t)(chain->seq + 1);
+		chain->since_key++;
+		chain->state = *o;
+		return (size_t)(p - out);
+	}
+	{
+		uint8_t kmask = 0;
+		uint8_t *kmask_at;
+
+		put16(p, o->object_abs);
+		p += 2;
+		chain->seq = (uint8_t)(chain->seq + 1);
+		*p++ = chain->seq;
+		kmask_at = p++;
+		*p++ = o->flags;
+		for (i = 0; i < 3; i++, p += 3)
+			put24(p, o->position[i]);
+		put32(p, o->axes);
+		p += 4;
+		if (o->velocity[0] || o->velocity[1] || o->velocity[2])
+		{
+			kmask |= OK_VELOCITY;
+			for (i = 0; i < 3; i++, p += 2)
+				put_s16(p, o->velocity[i]);
+		}
+		if (o->angular_velocity[0] || o->angular_velocity[1] || o->angular_velocity[2])
+		{
+			kmask |= OK_ANGULAR;
+			for (i = 0; i < 3; i++, p += 2)
+				put_s16(p, o->angular_velocity[i]);
+		}
+		if (o->time)
+		{
+			kmask |= OK_TIME;
+			put_s16(p, o->time);
+			p += 2;
+		}
+		*kmask_at = kmask;
+		chain->since_key = 0;
+		chain->valid = 1;
+		chain->state = *o;
+		return (size_t)(p - out);
+	}
+}
+
+size_t dce_object_decode(struct dce_object_chain *chain, uint8_t const *in, size_t size, struct dce_object *object,
+	int *status)
+{
+	uint8_t const *p = in;
+	uint8_t const *end = in + size;
+	uint16_t head;
+	int i;
+
+	if (size < 4)
+		return 0;
+	head = get16(p);
+	p += 2;
+	if (head & OBJECT_DELTA)
+	{
+		uint8_t base = *p++;
+		uint8_t mask = *p++;
+		struct dce_object o;
+		int usable = chain && chain->valid && chain->seq == base;
+
+		if (usable)
+			o = chain->state;
+		else
+			memset(&o, 0, sizeof(o));
+		if (mask & OD_POSITION)
+		{
+			if (end - p < 6)
+				return 0;
+			for (i = 0; i < 3; i++, p += 2)
+				o.position[i] += get_s16(p);
+		}
+		if (mask & OD_AXES)
+		{
+			if (end - p < 4)
+				return 0;
+			o.axes = get32(p);
+			p += 4;
+		}
+		if (mask & OD_VELOCITY)
+		{
+			if (end - p < 6)
+				return 0;
+			for (i = 0; i < 3; i++, p += 2)
+				o.velocity[i] = get_s16(p);
+		}
+		if (mask & OD_ANGULAR)
+		{
+			if (end - p < 6)
+				return 0;
+			for (i = 0; i < 3; i++, p += 2)
+				o.angular_velocity[i] = get_s16(p);
+		}
+		if (mask & OD_FLAGS)
+		{
+			if (end - p < 1)
+				return 0;
+			o.flags = *p++;
+		}
+		if (mask & OD_TIME)
+		{
+			if (end - p < 2)
+				return 0;
+			o.time = get_s16(p);
+			p += 2;
+		}
+		if (!usable)
+		{
+			*status = 0;
+			return (size_t)(p - in);
+		}
+		o.object_abs = (uint16_t)(head & 0x7FFF);
+		chain->seq = (uint8_t)(base + 1);
+		chain->since_key++;
+		chain->state = o;
+		*object = o;
+		*status = 1;
+		return (size_t)(p - in);
+	}
+	{
+		struct dce_object o;
+		uint8_t seq, kmask;
+
+		memset(&o, 0, sizeof(o));
+		if (end - p < 1 + 1 + 1 + 13)
+			return 0;
+		o.object_abs = head;
+		seq = *p++;
+		kmask = *p++;
+		o.flags = *p++;
+		for (i = 0; i < 3; i++, p += 3)
+			o.position[i] = get24(p);
+		o.axes = get32(p);
+		p += 4;
+		if (kmask & OK_VELOCITY)
+		{
+			if (end - p < 6)
+				return 0;
+			for (i = 0; i < 3; i++, p += 2)
+				o.velocity[i] = get_s16(p);
+		}
+		if (kmask & OK_ANGULAR)
+		{
+			if (end - p < 6)
+				return 0;
+			for (i = 0; i < 3; i++, p += 2)
+				o.angular_velocity[i] = get_s16(p);
+		}
+		if (kmask & OK_TIME)
+		{
+			if (end - p < 2)
+				return 0;
+			o.time = get_s16(p);
+			p += 2;
+		}
+		if (chain)
+		{
+			chain->valid = 1;
+			chain->seq = seq;
+			chain->since_key = 0;
+			chain->state = o;
+		}
+		*object = o;
+		*status = 1;
+		return (size_t)(p - in);
+	}
+}
+
+/* relayed actions */
+enum
+{
+	AM_FLAGS = 1 << 0,
+	AM_THROTTLE = 1 << 1,
+	AM_TRIGGER = 1 << 2,
+	AM_CHOICES = 1 << 3,
+	AM_OLDER = 4 /* bits 4 to 6: the older ticks' buttons that differ from the tick after */
+};
+
+size_t dce_action_encode(struct dce_action const *a, uint8_t *out, size_t cap)
+{
+	uint8_t *p = out;
+	uint8_t mask = 0;
+	uint8_t *mask_at;
+	int h;
+
+	if (cap < DCE_ACTION_MAX_BYTES || a->player >= 128)
+		return 0;
+	*p++ = a->player;
+	mask_at = p++;
+	put_s16(p, a->yaw);
+	put_s16(p + 2, a->pitch);
+	p += 4;
+	if (a->flags[0])
+	{
+		mask |= AM_FLAGS;
+		put16(p, a->flags[0]);
+		p += 2;
+	}
+	if (a->throttle_i || a->throttle_j)
+	{
+		mask |= AM_THROTTLE;
+		*p++ = (uint8_t)a->throttle_i;
+		*p++ = (uint8_t)a->throttle_j;
+	}
+	if (a->trigger)
+	{
+		mask |= AM_TRIGGER;
+		*p++ = a->trigger;
+	}
+	if (a->weapon != -1 || a->grenade != -1 || a->zoom != -1)
+	{
+		mask |= AM_CHOICES;
+		*p++ = (uint8_t)a->weapon;
+		*p++ = (uint8_t)a->grenade;
+		*p++ = (uint8_t)a->zoom;
+	}
+	for (h = 1; h < 4; h++)
+	{
+		if (a->flags[h] != a->flags[h - 1])
+		{
+			mask |= (uint8_t)(1 << (AM_OLDER + h - 1));
+			put16(p, a->flags[h]);
+			p += 2;
+		}
+	}
+	*mask_at = mask;
+	return (size_t)(p - out);
+}
+
+size_t dce_action_decode(uint8_t const *in, size_t size, struct dce_action *a)
+{
+	uint8_t const *p = in;
+	uint8_t const *end = in + size;
+	uint8_t mask;
+	int h;
+
+	memset(a, 0, sizeof(*a));
+	a->weapon = a->grenade = a->zoom = -1;
+	if (size < 6)
+		return 0;
+	a->player = *p++;
+	mask = *p++;
+	a->yaw = get_s16(p);
+	a->pitch = get_s16(p + 2);
+	p += 4;
+	if (mask & AM_FLAGS)
+	{
+		if (end - p < 2)
+			return 0;
+		a->flags[0] = get16(p);
+		p += 2;
+	}
+	if (mask & AM_THROTTLE)
+	{
+		if (end - p < 2)
+			return 0;
+		a->throttle_i = (int8_t)p[0];
+		a->throttle_j = (int8_t)p[1];
+		p += 2;
+	}
+	if (mask & AM_TRIGGER)
+	{
+		if (end - p < 1)
+			return 0;
+		a->trigger = *p++;
+	}
+	if (mask & AM_CHOICES)
+	{
+		if (end - p < 3)
+			return 0;
+		a->weapon = (int8_t)p[0];
+		a->grenade = (int8_t)p[1];
+		a->zoom = (int8_t)p[2];
+		p += 3;
+	}
+	for (h = 1; h < 4; h++)
+	{
+		a->flags[h] = a->flags[h - 1];
+		if (mask & (1 << (AM_OLDER + h - 1)))
+		{
+			if (end - p < 2)
+				return 0;
+			a->flags[h] = get16(p);
+			p += 2;
+		}
+	}
+	return (size_t)(p - in);
+}
