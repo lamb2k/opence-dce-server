@@ -570,7 +570,9 @@ word network_reliable_expand(
 	{
 		if (reliable_client.failed && reliable_client.generation == entries[0])
 			return 0;
-		csmemset(&reliable_client, 0, sizeof(reliable_client));
+		/* (the datagram records' chains are their own: a delta that does not fit is dropped) */
+		reliable_client.failed = FALSE;
+		reliable_client.state_size = 0;
 		dce_change_context_reset(&reliable_client.change);
 		reliable_client.generation = entries[0];
 		reliable_client.valid = TRUE;
@@ -715,13 +717,39 @@ void network_reliable_resync(
 		csmemset(state->objects, 0, MAXIMUM_TRACKED_OBJECTS * sizeof(*state->objects));
 }
 
+/* HALO_DCE_WIRE_LOG=1, a client: the records it took and dropped, logged every few seconds */
+static long reliable_client_records[2];
+static long reliable_client_dropped[2];
+static long reliable_client_log_time;
+
+static void reliable_client_note(int kind, int status)
+{
+	long now = game_time_get();
+
+	reliable_client_records[kind]++;
+	if (!status)
+		reliable_client_dropped[kind]++;
+	if (reliable_wire_log() && (now - reliable_client_log_time >= 150 || now < reliable_client_log_time))
+	{
+		platform_log("network: compact records from the host: %ld unit (%ld dropped), %ld object (%ld dropped)",
+			reliable_client_records[0], reliable_client_dropped[0], reliable_client_records[1], reliable_client_dropped[1]);
+		reliable_client_log_time = now;
+		csmemset(reliable_client_records, 0, sizeof(reliable_client_records));
+		csmemset(reliable_client_dropped, 0, sizeof(reliable_client_dropped));
+	}
+}
+
 size_t network_reliable_unit_decode(
 	byte const *in,
 	size_t size,
 	struct dce_unit *unit,
 	int *status)
 {
-	return dce_unit_decode(reliable_client.units, DCE_UNIT_CHAINS, in, size, unit, status);
+	size_t n = dce_unit_decode(reliable_client.units, DCE_UNIT_CHAINS, in, size, unit, status);
+
+	if (n)
+		reliable_client_note(0, *status);
+	return n;
 }
 
 size_t network_reliable_object_decode(
@@ -738,5 +766,11 @@ size_t network_reliable_object_decode(
 		reliable_client_objects = (struct dce_object_chain *)calloc(MAXIMUM_TRACKED_OBJECTS, sizeof(*reliable_client_objects));
 	if (!reliable_client_objects)
 		return 0;
-	return dce_object_decode(&reliable_client_objects[absolute_index], in, size, object, status);
+	{
+		size_t n = dce_object_decode(&reliable_client_objects[absolute_index], in, size, object, status);
+
+		if (n)
+			reliable_client_note(1, *status);
+		return n;
+	}
 }
