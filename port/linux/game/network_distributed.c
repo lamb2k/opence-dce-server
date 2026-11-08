@@ -755,8 +755,14 @@ static void distributed_slow_adapt(void)
 			short period = distributed_machine_slow_period(machine_index);
 			long budget = distributed_slow_budget();
 
-			if (rate > budget && period < DCE_SLOW_PERIOD_MAX)
-				period++;
+			if (rate > budget)
+			{
+				/* over: as many steps as the overshoot asks for, at once (a match's
+				first second is a burst), at least one */
+				long wanted = period * rate / budget + 1;
+
+				period = (short)MIN(DCE_SLOW_PERIOD_MAX, MAX(period + 1, wanted));
+			}
 			else if (rate * 10 < budget * 6 && period > DCE_SLOW_PERIOD_MIN)
 				period--;
 			distributed_slow_period[machine_index] = period;
