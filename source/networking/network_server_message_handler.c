@@ -1166,7 +1166,9 @@ static boolean network_game_server_send_game_settings_to_machines(
 			struct transport_address address;
 
 			network_connection_get_address(connection, &address, NULL);
-			if (p2p_queued_bytes(address.address.long_words[0]) > NETWORK_GAME_SETTINGS_HOLD_BYTES)
+			/* (only a retry waits: the start and a new round go at once, or the
+			start would wait on a modem line for ever) */
+			if (only_pending && p2p_queued_bytes(address.address.long_words[0]) > NETWORK_GAME_SETTINGS_HOLD_BYTES)
 			{
 				network_game_settings_machine_pending[machine_index] = TRUE;
 				result = FALSE;
