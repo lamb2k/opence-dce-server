@@ -89,6 +89,12 @@ struct machine_state
 	struct queue_item *queue;
 	long queue_head;
 	long queue_count;
+	/* the datagram records' chains (dce_compact.h), made with the first record */
+	struct dce_unit_chain *units;
+	struct dce_object_chain *objects;
+	/* an object whose creation is in the queue */
+	byte *pending;
+	long last_resync;
 	/* what went out lately, for the wire log */
 	long sent_messages;
 	long sent_bytes;
@@ -108,7 +114,10 @@ static struct
 	struct dce_change_context change;
 	byte state[DCE_STATE_MAX];
 	size_t state_size;
+	struct dce_unit_chain units[DCE_UNIT_CHAINS];
 } reliable_client;
+/* (the client's object chains: large, so made when first needed) */
+static struct dce_object_chain *reliable_client_objects;
 
 static boolean reliable_wire_log(void)
 {
@@ -133,6 +142,8 @@ static void reliable_begin_stream(struct machine_state *state)
 	state->state_size = 0;
 }
 
+static int reliable_chains(struct machine_state *state);
+
 static struct machine_state *reliable_machine(long machine_index, boolean create)
 {
 	struct machine_state *state;
@@ -146,6 +157,7 @@ static struct machine_state *reliable_machine(long machine_index, boolean create
 		if (!state)
 			return NULL;
 		machine_states[machine_index] = state;
+		reliable_chains(state);
 		reliable_begin_stream(state);
 	}
 	return state;
@@ -166,10 +178,18 @@ void network_reliable_new_game(void)
 			state->queue_head = 0;
 			state->queue_count = 0;
 			csmemset(state->unit_slot, 0, sizeof(state->unit_slot));
+			if (state->units)
+				csmemset(state->units, 0, DCE_UNIT_CHAINS * sizeof(*state->units));
+			if (state->objects)
+				csmemset(state->objects, 0, MAXIMUM_TRACKED_OBJECTS * sizeof(*state->objects));
+			if (state->pending)
+				csmemset(state->pending, 0, MAXIMUM_TRACKED_OBJECTS);
 			reliable_begin_stream(state);
 		}
 	}
 	csmemset(&reliable_client, 0, sizeof(reliable_client));
+	if (reliable_client_objects)
+		csmemset(reliable_client_objects, 0, MAXIMUM_TRACKED_OBJECTS * sizeof(*reliable_client_objects));
 }
 
 void network_reliable_machine_sync(
@@ -297,6 +317,13 @@ static boolean reliable_queue_push(struct machine_state *state, struct queue_ite
 		return FALSE;
 	state->queue[(state->queue_head + state->queue_count) % QUEUE_ITEMS] = *item;
 	state->queue_count++;
+	if (!item->marker && item->change.change == 0 && state->pending)
+	{
+		long absolute_index = DATUM_INDEX_TO_ABSOLUTE_INDEX(item->change.object_index);
+
+		if (absolute_index >= 0 && absolute_index < MAXIMUM_TRACKED_OBJECTS)
+			state->pending[absolute_index] = 1;
+	}
 	if (state->queue_count > state->queue_peak)
 		state->queue_peak = state->queue_count;
 	return TRUE;
@@ -337,7 +364,15 @@ static void reliable_release(long machine_index, struct machine_state *state, bo
 		while (state->queue_count && count < PACED_RECORDS_PER_MESSAGE &&
 			!state->queue[state->queue_head].marker)
 		{
-			batch[count++] = state->queue[state->queue_head].change;
+			batch[count] = state->queue[state->queue_head].change;
+			if (state->pending && batch[count].change == 0)
+			{
+				long absolute_index = DATUM_INDEX_TO_ABSOLUTE_INDEX(batch[count].object_index);
+
+				if (absolute_index >= 0 && absolute_index < MAXIMUM_TRACKED_OBJECTS)
+					state->pending[absolute_index] = 0;
+			}
+			count++;
 			state->queue_head = (state->queue_head + 1) % QUEUE_ITEMS;
 			state->queue_count--;
 		}
@@ -405,6 +440,9 @@ static boolean reliable_send_changes(
 		long absolute_index = DATUM_INDEX_TO_ABSOLUTE_INDEX(change->object_index);
 		boolean unit = FALSE;
 
+		/* (a made or deleted object's next state is a whole one) */
+		if (state->objects && absolute_index >= 0 && absolute_index < MAXIMUM_TRACKED_OBJECTS)
+			state->objects[absolute_index].valid = 0;
 		if (absolute_index >= 0 && absolute_index < MAXIMUM_TRACKED_OBJECTS)
 		{
 			if (change->change == 0)
@@ -608,4 +646,97 @@ word network_reliable_expand(
 	out_header->header = 0;
 	build_message_header(&out_header->header, out_size, 2, 0);
 	return out_size;
+}
+
+/* ---------- the datagram records: per machine chains */
+
+static int reliable_chains(struct machine_state *state)
+{
+	if (!state->units)
+		state->units = (struct dce_unit_chain *)calloc(DCE_UNIT_CHAINS, sizeof(*state->units));
+	if (!state->objects)
+		state->objects = (struct dce_object_chain *)calloc(MAXIMUM_TRACKED_OBJECTS, sizeof(*state->objects));
+	if (!state->pending)
+		state->pending = (byte *)calloc(MAXIMUM_TRACKED_OBJECTS, 1);
+	return state->units && state->objects && state->pending;
+}
+
+size_t network_reliable_unit_encode(
+	long machine_index,
+	struct dce_unit const *unit,
+	byte *out,
+	size_t capacity)
+{
+	struct machine_state *state = reliable_machine(machine_index, TRUE);
+
+	if (!state || !reliable_chains(state) || unit->player >= DCE_UNIT_CHAINS)
+		return 0;
+	return dce_unit_encode(&state->units[unit->player], FALSE, unit, out, capacity);
+}
+
+size_t network_reliable_object_encode(
+	long machine_index,
+	struct dce_object const *object,
+	byte *out,
+	size_t capacity)
+{
+	struct machine_state *state = reliable_machine(machine_index, TRUE);
+	long absolute_index = DATUM_INDEX_TO_ABSOLUTE_INDEX((long)object->object_index);
+
+	if (!state || !reliable_chains(state) || absolute_index < 0 || absolute_index >= MAXIMUM_TRACKED_OBJECTS)
+		return 0;
+	return dce_object_encode(&state->objects[absolute_index], FALSE, object, out, capacity);
+}
+
+boolean network_reliable_object_pending(
+	long machine_index,
+	long object_index)
+{
+	struct machine_state *state = reliable_machine(machine_index, FALSE);
+	long absolute_index = DATUM_INDEX_TO_ABSOLUTE_INDEX(object_index);
+
+	return state && state->pending && absolute_index >= 0 && absolute_index < MAXIMUM_TRACKED_OBJECTS &&
+		state->pending[absolute_index];
+}
+
+void network_reliable_resync(
+	long machine_index)
+{
+	struct machine_state *state = reliable_machine(machine_index, FALSE);
+
+	long now = game_time_get();
+
+	if (!state || (state->last_resync && now >= state->last_resync && now - state->last_resync < 15))
+		return;
+	state->last_resync = now ? now : 1;
+	if (state->units)
+		csmemset(state->units, 0, DCE_UNIT_CHAINS * sizeof(*state->units));
+	if (state->objects)
+		csmemset(state->objects, 0, MAXIMUM_TRACKED_OBJECTS * sizeof(*state->objects));
+}
+
+size_t network_reliable_unit_decode(
+	byte const *in,
+	size_t size,
+	struct dce_unit *unit,
+	int *status)
+{
+	return dce_unit_decode(reliable_client.units, DCE_UNIT_CHAINS, in, size, unit, status);
+}
+
+size_t network_reliable_object_decode(
+	byte const *in,
+	size_t size,
+	struct dce_object *object,
+	int *status)
+{
+	uint16_t absolute_index;
+
+	if (!dce_object_peek(in, size, &absolute_index) || absolute_index >= MAXIMUM_TRACKED_OBJECTS)
+		return 0;
+	if (!reliable_client_objects)
+		reliable_client_objects = (struct dce_object_chain *)calloc(MAXIMUM_TRACKED_OBJECTS, sizeof(*reliable_client_objects));
+	if (!reliable_client_objects)
+		return 0;
+	return dce_object_decode(&reliable_client_objects[absolute_index], in, size, object, status);
 }

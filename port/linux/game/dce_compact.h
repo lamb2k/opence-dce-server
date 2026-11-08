@@ -131,8 +131,8 @@ enum
 struct dce_unit
 {
 	uint8_t player, flags, parts, killer, unit_flags, camouflage;
-	uint16_t unit_abs; /* the absolute index of the unit's object: the receiver has the full index */
-	uint16_t vehicle_abs;
+	uint32_t unit_index; /* the datum indices, whole: a key carries them */
+	uint32_t vehicle_index;
 	int16_t seat;
 	int32_t position[3]; /* 1/256 world unit */
 	int16_t velocity[3], forward[3], up[3];
@@ -148,7 +148,7 @@ struct dce_unit_chain
 };
 
 /* the bytes written (at most DCE_UNIT_MAX_BYTES) */
-#define DCE_UNIT_MAX_BYTES 64
+#define DCE_UNIT_MAX_BYTES 72
 size_t dce_unit_encode(struct dce_unit_chain *chain, int force_key, struct dce_unit const *unit, uint8_t *out, size_t cap);
 /* the bytes read, 0 if malformed. *status: 1 = `unit` is the state, 0 = a delta whose base is not held (dropped; ask for keys) */
 size_t dce_unit_decode(struct dce_unit_chain *chains, size_t chain_count, uint8_t const *in, size_t size,
@@ -156,7 +156,7 @@ size_t dce_unit_decode(struct dce_unit_chain *chains, size_t chain_count, uint8_
 
 struct dce_object
 {
-	uint16_t object_abs;
+	uint32_t object_index; /* the datum index: its low 16 bits are its place in the object table (below 0x8000) */
 	uint8_t flags;
 	int16_t time;
 	int32_t position[3]; /* 1/256 world unit */

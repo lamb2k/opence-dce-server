@@ -56,6 +56,7 @@ machine (their datum identifiers need not be).
 
 #include "cseries.h"
 #include "cseries/errors.h"
+#include "dce_compact.h"
 #include "cache/cache_files.h"
 #include "devices/devices.h"
 #include "models/model_animation_definitions.h"
@@ -1335,7 +1336,8 @@ void distributed_send(
 		short index;
 
 		for (index = 0; index < machine_count; index++)
-			distributed_batch_add((short)machine_indices[index], message, size, distributed_entry_size(count, size));
+			distributed_batch_add((short)machine_indices[index], message, size,
+				type >= _distributed_message_compact_object_changes ? 0 : distributed_entry_size(count, size));
 		break;
 	}
 	case _distributed_to_clients_reliably:
@@ -1359,7 +1361,8 @@ void distributed_send_to_machine(
 	if (machine_index < 0 || machine_index >= HALO_PORT_MAXIMUM_NETWORK_MACHINES)
 		return;
 	distributed_fill_header(message, type, count, size);
-	distributed_batch_add((short)machine_index, message, size, distributed_entry_size(count, size));
+	distributed_batch_add((short)machine_index, message, size,
+		type >= _distributed_message_compact_object_changes ? 0 : distributed_entry_size(count, size));
 }
 
 void distributed_send_to_machine_reliably(
@@ -2912,6 +2915,14 @@ static void distributed_handle_unit_state(
 	}
 }
 
+/* (a client) a compact record was a difference from one it does not have: the host is asked for whole ones */
+static boolean distributed_need_keys;
+
+void distributed_note_keys_needed(void)
+{
+	distributed_need_keys = TRUE;
+}
+
 /* (a client) the host's word on every player's unit */
 static void distributed_handle_unit_states(
 	byte const *data,
@@ -2958,6 +2969,8 @@ static void distributed_client_send_inputs(
 		if (!update_client_distributed_input(local_player_index, &input->tick, &input->action, input->control_flags))
 			continue;
 		input->player_index = distributed_player_to_byte(player_index);
+		/* (network version 42: bit 0 of the pad, the host is asked for whole records) */
+		input->pad = distributed_need_keys ? 1 : 0;
 		input->structure_bsp_index = (byte)global_structure_bsp_index_get();
 		input->coop_no_friendly_fire = network_coop_active() && !network_coop_own_friendly_fire();
 		input->host_time = distributed_host_time;
@@ -2965,6 +2978,7 @@ static void distributed_client_send_inputs(
 	}
 	if (count)
 	{
+		distributed_need_keys = FALSE;
 		distributed_send(&message, _distributed_message_player_inputs, count,
 			(word)(sizeof(message.header) + count * sizeof(struct distributed_player_input)), _distributed_to_host);
 	}
@@ -3017,6 +3031,8 @@ static void distributed_handle_inputs(
 		struct player_datum *player;
 		struct player_action action;
 
+		if (input->pad & 1)
+			network_reliable_resync(machine_index);
 		if (input->player_index >= MAXIMUM_TRACKED_PLAYERS ||
 			!distributed_machine_has_player(machine_index, input->player_index))
 		{
@@ -3217,6 +3233,180 @@ static word distributed_relayed_action_read(
 		}
 	}
 	return (word)(cursor - buffer);
+}
+
+/* ---------- network version 42: the compact forms of a unit's state and a relayed action (dce_compact.h) */
+
+typedef char distributed_compact_powerups_assert[NUMBER_OF_PLAYER_POWERUPS == 2 ? 1 : -1];
+typedef char distributed_compact_history_assert[DISTRIBUTED_INPUT_HISTORY == 4 ? 1 : -1];
+
+static void distributed_unit_to_compact(
+	struct distributed_unit_state const *state,
+	boolean own,
+	struct dce_unit *unit)
+{
+	byte flags = state->flags;
+
+	csmemset(unit, 0, sizeof(*unit));
+	if (!own)
+		SET_FLAG(flags, _distributed_unit_predicted_bit, FALSE);
+	unit->player = state->player_index;
+	unit->flags = flags;
+	unit->killer = NO_PLAYER;
+	unit->seat = -1;
+	unit->up[2] = (short)DISTRIBUTED_UNIT_SCALE;
+	if (TEST_FLAG(flags, _distributed_unit_alive_bit))
+	{
+		unit->unit_index = (unsigned long)state->unit_index;
+		if (state->vehicle_index != NONE)
+		{
+			SET_FLAG(unit->parts, _distributed_unit_part_riding_bit, TRUE);
+			unit->vehicle_index = (unsigned long)state->vehicle_index;
+			unit->seat = state->seat_index;
+		}
+		if (TEST_FLAG(flags, _distributed_unit_placed_bit))
+		{
+			unit->position[0] = dce_position_quantize(state->position.x);
+			unit->position[1] = dce_position_quantize(state->position.y);
+			unit->position[2] = dce_position_quantize(state->position.z);
+			unit->velocity[0] = state->velocity.i;
+			unit->velocity[1] = state->velocity.j;
+			unit->velocity[2] = state->velocity.k;
+			unit->forward[0] = state->forward.i;
+			unit->forward[1] = state->forward.j;
+			unit->forward[2] = state->forward.k;
+			if (state->up.i || state->up.j || state->up.k != (short)DISTRIBUTED_UNIT_SCALE)
+			{
+				SET_FLAG(unit->parts, _distributed_unit_part_up_bit, TRUE);
+				unit->up[0] = state->up.i;
+				unit->up[1] = state->up.j;
+				unit->up[2] = state->up.k;
+			}
+		}
+		unit->predicted = state->predicted_time;
+		unit->body = state->body_vitality;
+		unit->shield = state->shield_vitality;
+		if (state->current_body_damage || state->recent_body_damage || state->current_shield_damage ||
+			state->recent_shield_damage)
+		{
+			SET_FLAG(unit->parts, _distributed_unit_part_damage_bit, TRUE);
+			unit->damage[0] = state->current_body_damage;
+			unit->damage[1] = state->recent_body_damage;
+			unit->damage[2] = state->current_shield_damage;
+			unit->damage[3] = state->recent_shield_damage;
+		}
+		if (state->powerup_durations[0] || state->powerup_durations[1])
+		{
+			SET_FLAG(unit->parts, _distributed_unit_part_powerups_bit, TRUE);
+			unit->powerups[0] = state->powerup_durations[0];
+			unit->powerups[1] = state->powerup_durations[1];
+		}
+		if (state->unit_flags || state->active_camouflage)
+		{
+			SET_FLAG(unit->parts, _distributed_unit_part_camouflage_bit, TRUE);
+			unit->unit_flags = state->unit_flags;
+			unit->camouflage = state->active_camouflage;
+		}
+	}
+	else if (state->killing_player_index != NO_PLAYER)
+	{
+		SET_FLAG(unit->parts, _distributed_unit_part_killer_bit, TRUE);
+		unit->killer = state->killing_player_index;
+	}
+}
+
+static void distributed_unit_from_compact(
+	struct dce_unit const *unit,
+	struct distributed_unit_state *state)
+{
+	csmemset(state, 0, sizeof(*state));
+	state->unit_index = NONE;
+	state->vehicle_index = NONE;
+	state->seat_index = NONE;
+	state->killing_player_index = NO_PLAYER;
+	state->up.k = (short)DISTRIBUTED_UNIT_SCALE;
+	state->player_index = unit->player;
+	state->flags = unit->flags;
+	if (TEST_FLAG(unit->flags, _distributed_unit_alive_bit))
+	{
+		state->unit_index = (long)unit->unit_index;
+		if (TEST_FLAG(unit->parts, _distributed_unit_part_riding_bit))
+		{
+			state->vehicle_index = (long)unit->vehicle_index;
+			state->seat_index = unit->seat;
+		}
+		if (TEST_FLAG(unit->flags, _distributed_unit_placed_bit))
+		{
+			state->position.x = dce_position_dequantize(unit->position[0]);
+			state->position.y = dce_position_dequantize(unit->position[1]);
+			state->position.z = dce_position_dequantize(unit->position[2]);
+			state->velocity.i = unit->velocity[0];
+			state->velocity.j = unit->velocity[1];
+			state->velocity.k = unit->velocity[2];
+			state->forward.i = unit->forward[0];
+			state->forward.j = unit->forward[1];
+			state->forward.k = unit->forward[2];
+			if (TEST_FLAG(unit->parts, _distributed_unit_part_up_bit))
+			{
+				state->up.i = unit->up[0];
+				state->up.j = unit->up[1];
+				state->up.k = unit->up[2];
+			}
+		}
+		state->predicted_time = unit->predicted;
+		state->body_vitality = unit->body;
+		state->shield_vitality = unit->shield;
+		state->current_body_damage = unit->damage[0];
+		state->recent_body_damage = unit->damage[1];
+		state->current_shield_damage = unit->damage[2];
+		state->recent_shield_damage = unit->damage[3];
+		state->powerup_durations[0] = unit->powerups[0];
+		state->powerup_durations[1] = unit->powerups[1];
+		state->unit_flags = unit->unit_flags;
+		state->active_camouflage = unit->camouflage;
+	}
+	else
+		state->killing_player_index = unit->killer;
+}
+
+static void distributed_action_to_compact(
+	struct distributed_relayed_action const *relayed,
+	struct dce_action *action)
+{
+	short history;
+
+	csmemset(action, 0, sizeof(*action));
+	action->player = relayed->player_index;
+	action->weapon = relayed->desired_weapon_index;
+	action->grenade = relayed->desired_grenade_index;
+	action->zoom = relayed->desired_zoom_level;
+	action->throttle_i = relayed->throttle_i;
+	action->throttle_j = relayed->throttle_j;
+	action->trigger = relayed->primary_trigger;
+	action->yaw = relayed->yaw;
+	action->pitch = relayed->pitch;
+	for (history = 0; history < DISTRIBUTED_INPUT_HISTORY; history++)
+		action->flags[history] = relayed->control_flags[history];
+}
+
+static void distributed_action_from_compact(
+	struct dce_action const *action,
+	struct distributed_relayed_action *relayed)
+{
+	short history;
+
+	csmemset(relayed, 0, sizeof(*relayed));
+	relayed->player_index = action->player;
+	relayed->desired_weapon_index = action->weapon;
+	relayed->desired_grenade_index = action->grenade;
+	relayed->desired_zoom_level = action->zoom;
+	relayed->throttle_i = action->throttle_i;
+	relayed->throttle_j = action->throttle_j;
+	relayed->primary_trigger = action->trigger;
+	relayed->yaw = action->yaw;
+	relayed->pitch = action->pitch;
+	for (history = 0; history < DISTRIBUTED_INPUT_HISTORY; history++)
+		relayed->control_flags[history] = action->flags[history];
 }
 
 /* (the host) what each client is sent this tick of every player: their unit,
@@ -3484,33 +3674,64 @@ static void distributed_host_send_players(
 		long machine_index = machine_indices[machine_number];
 		short player_index;
 
-		distributed_packer_begin(&distributed_packer, (short)machine_index, _distributed_message_relayed_actions,
+		distributed_packer_begin(&distributed_packer, (short)machine_index, _distributed_message_compact_relayed_actions,
 			&distributed_host_update_number, sizeof(distributed_host_update_number));
 		for (player_index = 0; player_index < MAXIMUM_TRACKED_PLAYERS; player_index++)
 		{
-			byte entry[DISTRIBUTED_RELAYED_ACTION_MAXIMUM_SIZE];
+			byte entry[DCE_ACTION_MAX_BYTES];
 
 			if (TEST_FLAG(distributed_sends[machine_index][player_index], _distributed_send_action_bit))
 			{
-				distributed_packer_add(&distributed_packer, entry,
-					distributed_relayed_action_write(&distributed_host_actions[player_index], entry));
+				struct dce_action action;
+				size_t size;
+
+				distributed_action_to_compact(&distributed_host_actions[player_index], &action);
+				size = dce_action_encode(&action, entry, sizeof(entry));
+				if (size)
+					distributed_packer_add(&distributed_packer, entry, (word)size);
 			}
 		}
 		distributed_packer_flush(&distributed_packer);
-		distributed_packer_begin(&distributed_packer, (short)machine_index, _distributed_message_unit_states, NULL, 0);
+		distributed_packer_begin(&distributed_packer, (short)machine_index, _distributed_message_compact_unit_states, NULL, 0);
 		for (player_index = 0; player_index < MAXIMUM_TRACKED_PLAYERS; player_index++)
 		{
-			byte entry[DISTRIBUTED_UNIT_STATE_MAXIMUM_SIZE];
+			byte entry[DCE_UNIT_MAX_BYTES];
 
 			if (TEST_FLAG(distributed_sends[machine_index][player_index], _distributed_send_state_bit))
 			{
-				distributed_packer_add(&distributed_packer, entry,
-					distributed_unit_state_write(&distributed_host_states[player_index],
-						distributed_player_machines[player_index] == machine_index, entry));
+				struct dce_unit unit;
+				size_t size;
+
+				distributed_unit_to_compact(&distributed_host_states[player_index],
+					distributed_player_machines[player_index] == machine_index, &unit);
+				size = network_reliable_unit_encode(machine_index, &unit, entry, sizeof(entry));
+				if (size)
+					distributed_packer_add(&distributed_packer, entry, (word)size);
 			}
 		}
 		distributed_packer_flush(&distributed_packer);
 	}
+}
+
+/* (a client) a relayed action of the host's, as its player's next */
+static void distributed_apply_relayed_action(
+	long update_number,
+	struct distributed_relayed_action const *relayed)
+{
+	struct player_action action;
+
+	csmemset(&action, 0, sizeof(action));
+	action.control_flags = relayed->control_flags[0];
+	action.desired_facing.yaw = distributed_angle_unpack(relayed->yaw, FALSE);
+	action.desired_facing.pitch = distributed_angle_unpack(relayed->pitch, TRUE);
+	action.throttle.i = PIN((real)relayed->throttle_i / 127.0f, -1.0f, 1.0f);
+	action.throttle.j = PIN((real)relayed->throttle_j / 127.0f, -1.0f, 1.0f);
+	action.primary_trigger = (real)relayed->primary_trigger / 255.0f;
+	action.desired_weapon_index = relayed->desired_weapon_index;
+	action.desired_grenade_index = relayed->desired_grenade_index;
+	action.desired_zoom_level = relayed->desired_zoom_level;
+	update_client_handle_relayed_action(relayed->player_index, update_number, &action,
+		relayed->control_flags, DISTRIBUTED_INPUT_HISTORY);
 }
 
 /* (a client) the host's input for its players, for the others it drives:
@@ -3528,24 +3749,65 @@ static void distributed_handle_actions(
 	for (index = 0; index < count; index++)
 	{
 		struct distributed_relayed_action relayed;
-		struct player_action action;
 		word size = distributed_relayed_action_read(data, end, &relayed);
 
 		if (!size)
 			break;
 		data += size;
-		csmemset(&action, 0, sizeof(action));
-		action.control_flags = relayed.control_flags[0];
-		action.desired_facing.yaw = distributed_angle_unpack(relayed.yaw, FALSE);
-		action.desired_facing.pitch = distributed_angle_unpack(relayed.pitch, TRUE);
-		action.throttle.i = PIN((real)relayed.throttle_i / 127.0f, -1.0f, 1.0f);
-		action.throttle.j = PIN((real)relayed.throttle_j / 127.0f, -1.0f, 1.0f);
-		action.primary_trigger = (real)relayed.primary_trigger / 255.0f;
-		action.desired_weapon_index = relayed.desired_weapon_index;
-		action.desired_grenade_index = relayed.desired_grenade_index;
-		action.desired_zoom_level = relayed.desired_zoom_level;
-		update_client_handle_relayed_action(relayed.player_index, update_number, &action,
-			relayed.control_flags, DISTRIBUTED_INPUT_HISTORY);
+		distributed_apply_relayed_action(update_number, &relayed);
+	}
+}
+
+/* (a client) the same in the compact form */
+static void distributed_handle_compact_actions(
+	byte const *data,
+	byte const *end,
+	short count)
+{
+	long update_number;
+	short index;
+
+	if (!distributed_take(&data, end, &update_number, sizeof(update_number)))
+		return;
+	for (index = 0; index < count; index++)
+	{
+		struct dce_action action;
+		struct distributed_relayed_action relayed;
+		size_t size = dce_action_decode(data, (size_t)(end - data), &action);
+
+		if (!size)
+			break;
+		data += size;
+		distributed_action_from_compact(&action, &relayed);
+		distributed_apply_relayed_action(update_number, &relayed);
+	}
+}
+
+/* (a client) the host's compact unit states */
+static void distributed_handle_compact_unit_states(
+	byte const *data,
+	byte const *end,
+	short count)
+{
+	short index;
+
+	for (index = 0; index < count; index++)
+	{
+		struct dce_unit unit;
+		struct distributed_unit_state state;
+		int status = 0;
+		size_t size = network_reliable_unit_decode(data, (size_t)(end - data), &unit, &status);
+
+		if (!size)
+			break;
+		data += size;
+		if (status)
+		{
+			distributed_unit_from_compact(&unit, &state);
+			distributed_handle_unit_state(&state);
+		}
+		else
+			distributed_need_keys = TRUE;
 	}
 }
 
@@ -4986,9 +5248,25 @@ void network_distributed_handle_message(
 		}
 		return;
 	}
+	/* (network version 42: the host's compact datagrams, read as they come) */
+	if (machine_index == NONE && header.type == _distributed_message_compact_unit_states)
+	{
+		distributed_handle_compact_unit_states((byte const *)entries, (byte const *)message + size, header.count);
+		return;
+	}
+	if (machine_index == NONE && header.type == _distributed_message_compact_relayed_actions)
+	{
+		distributed_handle_compact_actions((byte const *)entries, (byte const *)message + size, header.count);
+		return;
+	}
+	if (machine_index == NONE && header.type == _distributed_message_compact_object_states)
+	{
+		network_objects_handle_compact_states(entries, (word)(size - sizeof(header)), header.count, header.game_time);
+		return;
+	}
 	/* (network version 42: a compact form, which is the wide message again when read) */
 	if (header.type >= _distributed_message_compact_object_changes &&
-		header.type <= _distributed_message_compact_object_states)
+		header.type <= _distributed_message_compact_game_state)
 	{
 		word expanded[(MAXIMUM_MESSAGE_SIZE + sizeof(word)) / sizeof(word)];
 		word expanded_size = machine_index == NONE ?

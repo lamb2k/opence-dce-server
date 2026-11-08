@@ -164,6 +164,7 @@ enum
 	_distributed_message_compact_game_state = 98,
 	_distributed_message_compact_unit_states = 99,
 	_distributed_message_compact_object_states = 100,
+	_distributed_message_compact_relayed_actions = 101,
 
 	NUMBER_OF_DISTRIBUTED_MESSAGES
 };
@@ -269,6 +270,23 @@ void network_reliable_machine_sync(long machine_index);
 void network_reliable_new_game(void);
 /* (a client) a compact message of the host's as the wide one the handlers read: its size, 0 if it is bad */
 word network_reliable_expand(void const *message, word size, void *out, word capacity);
+
+/* the host's compact datagram records to a machine: a unit's, an object's (each a key or a difference from
+the last record sent to that machine for it, dce_compact.h). Each returns the bytes written, 0 for none. */
+struct dce_unit;
+struct dce_object;
+size_t network_reliable_unit_encode(long machine_index, struct dce_unit const *unit, byte *out, size_t capacity);
+size_t network_reliable_object_encode(long machine_index, struct dce_object const *object, byte *out, size_t capacity);
+/* whether the object's creation is still waiting its turn to go to a slow machine (its state would be no use to it yet) */
+boolean network_reliable_object_pending(long machine_index, long object_index);
+/* the machine says it lost some: its next records are whole ones */
+void network_reliable_resync(long machine_index);
+/* (a client) a record of the host's was a difference from one it does not have: the host is asked for whole ones */
+void distributed_note_keys_needed(void);
+/* (a client) a compact record of the host's: the bytes read, 0 if bad; *status 1 for a record, 0 for a difference
+whose base this machine does not have (dropped) */
+size_t network_reliable_unit_decode(byte const *in, size_t size, struct dce_unit *unit, int *status);
+size_t network_reliable_object_decode(byte const *in, size_t size, struct dce_object *object, int *status);
 
 /* ---------- prototypes/NETWORK_DISTRIBUTED.C */
 
@@ -485,6 +503,8 @@ void network_objects_handle_changes(void const *entries, short count);
 void network_objects_handle_synchronized(void);
 /* (host_time: the message's, the host's tick its states are of) */
 void network_objects_handle_states(void const *entries, short count, long host_time);
+/* (network version 42) the same from the compact records, entries_size bytes of them */
+void network_objects_handle_compact_states(void const *entries, word entries_size, short count, long host_time);
 void network_objects_handle_inventories(void const *entries, short count);
 /* (a client) its own player picked up the weapon, to ready once its unit has it */
 void network_objects_client_picked_up_weapon(short local_player_index, long unit_index, long definition_index);

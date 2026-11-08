@@ -753,9 +753,9 @@ static int unit_delta_ok(struct dce_unit_chain const *chain, struct dce_unit con
 
 	if (!chain->valid || chain->since_key >= DCE_KEY_INTERVAL)
 		return 0;
-	if (!(b->flags & DCE_UNIT_ALIVE) || !(u->flags & DCE_UNIT_ALIVE) || b->unit_abs != u->unit_abs ||
+	if (!(b->flags & DCE_UNIT_ALIVE) || !(u->flags & DCE_UNIT_ALIVE) || b->unit_index != u->unit_index ||
 		((b->flags ^ u->flags) & DCE_UNIT_PLACED) || ((b->parts ^ u->parts) & (DCE_PART_RIDING | DCE_PART_UP)) ||
-		((u->parts & DCE_PART_RIDING) && (b->vehicle_abs != u->vehicle_abs || b->seat != u->seat)))
+		((u->parts & DCE_PART_RIDING) && (b->vehicle_index != u->vehicle_index || b->seat != u->seat)))
 		return 0;
 	for (i = 0; i < 3; i++)
 	{
@@ -846,13 +846,13 @@ size_t dce_unit_encode(struct dce_unit_chain *chain, int force_key, struct dce_u
 	*p++ = u->parts;
 	if (u->flags & DCE_UNIT_ALIVE)
 	{
-		put16(p, u->unit_abs);
-		p += 2;
+		put32(p, u->unit_index);
+		p += 4;
 		if (u->parts & DCE_PART_RIDING)
 		{
-			put16(p, u->vehicle_abs);
-			put_s16(p + 2, u->seat);
-			p += 4;
+			put32(p, u->vehicle_index);
+			put_s16(p + 4, u->seat);
+			p += 6;
 		}
 		if (u->flags & DCE_UNIT_PLACED)
 		{
@@ -990,17 +990,17 @@ size_t dce_unit_decode(struct dce_unit_chain *chains, size_t chain_count, uint8_
 		u.parts = *p++;
 		if (u.flags & DCE_UNIT_ALIVE)
 		{
-			if (end - p < 2)
+			if (end - p < 4)
 				return 0;
-			u.unit_abs = get16(p);
-			p += 2;
+			u.unit_index = get32(p);
+			p += 4;
 			if (u.parts & DCE_PART_RIDING)
 			{
-				if (end - p < 4)
+				if (end - p < 6)
 					return 0;
-				u.vehicle_abs = get16(p);
-				u.seat = get_s16(p + 2);
-				p += 4;
+				u.vehicle_index = get32(p);
+				u.seat = get_s16(p + 4);
+				p += 6;
 			}
 			if (u.flags & DCE_UNIT_PLACED)
 			{
@@ -1102,7 +1102,7 @@ size_t dce_object_encode(struct dce_object_chain *chain, int force_key, struct d
 	uint8_t *p = out;
 	int i;
 
-	if (cap < DCE_OBJECT_MAX_BYTES || o->object_abs >= 0x8000)
+	if (cap < DCE_OBJECT_MAX_BYTES || (o->object_index & 0xFFFF) >= 0x8000)
 		return 0;
 	if (!force_key && object_delta_ok(chain, o))
 	{
@@ -1110,7 +1110,7 @@ size_t dce_object_encode(struct dce_object_chain *chain, int force_key, struct d
 		uint8_t mask = 0;
 		uint8_t *mask_at;
 
-		put16(p, (uint16_t)(o->object_abs | OBJECT_DELTA));
+		put16(p, (uint16_t)((o->object_index & 0xFFFF) | OBJECT_DELTA));
 		p += 2;
 		*p++ = chain->seq;
 		mask_at = p++;
@@ -1159,12 +1159,14 @@ size_t dce_object_encode(struct dce_object_chain *chain, int force_key, struct d
 		uint8_t kmask = 0;
 		uint8_t *kmask_at;
 
-		put16(p, o->object_abs);
+		put16(p, (uint16_t)(o->object_index & 0xFFFF));
 		p += 2;
 		chain->seq = (uint8_t)(chain->seq + 1);
 		*p++ = chain->seq;
 		kmask_at = p++;
 		*p++ = o->flags;
+		put16(p, (uint16_t)(o->object_index >> 16));
+		p += 2;
 		for (i = 0; i < 3; i++, p += 3)
 			put24(p, o->position[i]);
 		put32(p, o->axes);
@@ -1264,7 +1266,7 @@ size_t dce_object_decode(struct dce_object_chain *chain, uint8_t const *in, size
 			*status = 0;
 			return (size_t)(p - in);
 		}
-		o.object_abs = (uint16_t)(head & 0x7FFF);
+		o.object_index = chain->state.object_index;
 		chain->seq = (uint8_t)(base + 1);
 		chain->since_key++;
 		chain->state = o;
@@ -1277,12 +1279,13 @@ size_t dce_object_decode(struct dce_object_chain *chain, uint8_t const *in, size
 		uint8_t seq, kmask;
 
 		memset(&o, 0, sizeof(o));
-		if (end - p < 1 + 1 + 1 + 13)
+		if (end - p < 1 + 1 + 1 + 2 + 13)
 			return 0;
-		o.object_abs = head;
 		seq = *p++;
 		kmask = *p++;
 		o.flags = *p++;
+		o.object_index = (uint32_t)head | ((uint32_t)get16(p) << 16);
+		p += 2;
 		for (i = 0; i < 3; i++, p += 3)
 			o.position[i] = get24(p);
 		o.axes = get32(p);

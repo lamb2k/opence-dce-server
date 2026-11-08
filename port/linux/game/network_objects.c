@@ -65,6 +65,7 @@ same datum index (identifier and all), so that any message can name one:
 #include "cutscene/cinematics.h"
 #include "network_coop.h"
 #include "network_distributed.h"
+#include "dce_compact.h"
 #include "profile_sections.h"
 
 #include <math.h>
@@ -1505,6 +1506,137 @@ static boolean distributed_host_rest_state_due(
 #define DCE_SLOW_REST_PERIOD_TICKS 10 /* at a period of 3; it scales with the client's period */
 static long objects_host_slow_rest_cursors[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 
+/* ---------- network version 42: the compact object states */
+
+static void distributed_object_state_to_compact(
+	struct distributed_object_state const *state,
+	struct dce_object *object)
+{
+	real_vector3d forward, up;
+	float f[3], u[3];
+
+	csmemset(object, 0, sizeof(*object));
+	distributed_vector_unpack(&state->forward, DISTRIBUTED_UNIT_SCALE, &forward);
+	distributed_vector_unpack(&state->up, DISTRIBUTED_UNIT_SCALE, &up);
+	f[0] = forward.i; f[1] = forward.j; f[2] = forward.k;
+	u[0] = up.i; u[1] = up.j; u[2] = up.k;
+	object->object_index = (unsigned long)state->object_index;
+	object->flags = state->flags;
+	object->time = state->time;
+	object->position[0] = dce_position_quantize(state->position.x);
+	object->position[1] = dce_position_quantize(state->position.y);
+	object->position[2] = dce_position_quantize(state->position.z);
+	object->axes = dce_axes_pack(f, u);
+	object->velocity[0] = state->translational_velocity.i;
+	object->velocity[1] = state->translational_velocity.j;
+	object->velocity[2] = state->translational_velocity.k;
+	object->angular_velocity[0] = state->angular_velocity.i;
+	object->angular_velocity[1] = state->angular_velocity.j;
+	object->angular_velocity[2] = state->angular_velocity.k;
+}
+
+static void distributed_object_state_from_compact(
+	struct dce_object const *object,
+	struct distributed_object_state *state)
+{
+	float f[3], u[3];
+	real_vector3d forward, up;
+
+	csmemset(state, 0, sizeof(*state));
+	dce_axes_unpack(object->axes, f, u);
+	forward.i = f[0]; forward.j = f[1]; forward.k = f[2];
+	up.i = u[0]; up.j = u[1]; up.k = u[2];
+	state->object_index = (long)object->object_index;
+	state->flags = object->flags;
+	state->time = object->time;
+	state->position.x = dce_position_dequantize(object->position[0]);
+	state->position.y = dce_position_dequantize(object->position[1]);
+	state->position.z = dce_position_dequantize(object->position[2]);
+	distributed_vector_pack(&forward, DISTRIBUTED_UNIT_SCALE, &state->forward);
+	distributed_vector_pack(&up, DISTRIBUTED_UNIT_SCALE, &state->up);
+	state->translational_velocity.i = object->velocity[0];
+	state->translational_velocity.j = object->velocity[1];
+	state->translational_velocity.k = object->velocity[2];
+	state->angular_velocity.i = object->angular_velocity[0];
+	state->angular_velocity.j = object->angular_velocity[1];
+	state->angular_velocity.k = object->angular_velocity[2];
+}
+
+/* (the host) a message of states to a machine, in the compact form, without those of objects its
+creation has not yet reached */
+static void distributed_send_object_states(
+	long machine_index,
+	struct distributed_object_state_message const *message,
+	short count)
+{
+	struct
+	{
+		struct distributed_message_header header;
+		byte data[900 + DCE_OBJECT_MAX_BYTES];
+	} compact;
+	size_t used = 0;
+	short in_message = 0;
+	short index;
+
+	for (index = 0; index < count; index++)
+	{
+		struct dce_object object;
+		size_t size;
+
+		if (network_reliable_object_pending(machine_index, message->states[index].object_index))
+			continue;
+		if (used >= 900)
+		{
+			distributed_send_to_machine(machine_index, &compact, _distributed_message_compact_object_states,
+				in_message, (word)(sizeof(compact.header) + used));
+			used = 0;
+			in_message = 0;
+		}
+		distributed_object_state_to_compact(&message->states[index], &object);
+		size = network_reliable_object_encode(machine_index, &object, compact.data + used, sizeof(compact.data) - used);
+		if (!size)
+			continue;
+		used += size;
+		in_message++;
+	}
+	if (in_message)
+	{
+		distributed_send_to_machine(machine_index, &compact, _distributed_message_compact_object_states, in_message,
+			(word)(sizeof(compact.header) + used));
+	}
+}
+
+/* (a client) the host's compact object states */
+void network_objects_handle_compact_states(
+	void const *entries,
+	word entries_size,
+	short count,
+	long host_time)
+{
+	byte const *data = (byte const *)entries;
+	byte const *end = data + entries_size;
+	short index;
+
+	for (index = 0; index < count; index++)
+	{
+		struct dce_object object;
+		struct distributed_object_state state;
+		int status = 0;
+		size_t size = network_reliable_object_decode(data, (size_t)(end - data), &object, &status);
+
+		if (!size)
+			break;
+		data += size;
+		if (!status)
+		{
+			distributed_note_keys_needed();
+			continue;
+		}
+		distributed_object_state_from_compact(&object, &state);
+		network_objects_handle_states(&state, 1, host_time);
+	}
+}
+
 /* where the moving objects are, to each client those near its players
 every tick, those further less often, and the vehicle it drives itself
 (which it has already) every few ticks, with which of its ticks the host
@@ -1625,8 +1757,7 @@ static void distributed_host_send_states(
 			}
 			if (++count == limit)
 			{
-				distributed_send_to_machine(machine_index, &message, _distributed_message_object_states, count,
-					(word)(sizeof(message.header) + count * sizeof(struct distributed_object_state)));
+				distributed_send_object_states(machine_index, &message, count);
 				count = 0;
 			}
 		}
@@ -1648,18 +1779,14 @@ static void distributed_host_send_states(
 				distributed_state_from_object(object_index, &message.states[count]);
 				if (++count == limit)
 				{
-					distributed_send_to_machine(machine_index, &message, _distributed_message_object_states, count,
-						(word)(sizeof(message.header) + count * sizeof(struct distributed_object_state)));
+					distributed_send_object_states(machine_index, &message, count);
 					count = 0;
 				}
 			}
 			objects_host_slow_rest_cursors[machine_index] = (objects_host_slow_rest_cursors[machine_index] + step) % told_count;
 		}
 		if (count)
-		{
-			distributed_send_to_machine(machine_index, &message, _distributed_message_object_states, count,
-				(word)(sizeof(message.header) + count * sizeof(struct distributed_object_state)));
-		}
+			distributed_send_object_states(machine_index, &message, count);
 	}
 }
 
