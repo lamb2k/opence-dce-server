@@ -1,3 +1,4 @@
+#include <stdlib.h>
 /*
 NETWORK_DISTRIBUTED.C
 
@@ -690,13 +691,82 @@ static struct distributed_client_identity distributed_sent_identity;
 client: whether it sent its own this game */
 static struct distributed_client_build distributed_client_builds[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 static boolean distributed_client_build_known[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
-#define DCE_SLOW_LINE_PERIOD_TICKS 3
+#define DCE_SLOW_LINE_PERIOD_TICKS 3 /* a modem client's first period */
+#define DCE_SLOW_PERIOD_MIN 2
+#define DCE_SLOW_PERIOD_MAX 10
+#define DCE_SLOW_WINDOW_TICKS 30 /* one second */
+#define DCE_SLOW_WIRE_OVERHEAD 36 /* IP, UDP and tunnel bytes on each datagram */
+#define DCE_SLOW_BUDGET_DEFAULT 2400 /* of a 33.6k line's 3360 B/s, room for upload acks and retries */
+/* DCE official server: per modem client, a period that follows the bytes it is sent */
+static long distributed_slow_bytes[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
+static long distributed_slow_window_start[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
+static short distributed_slow_period[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
+static short distributed_slow_windows[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 /* a change of a player's action not yet sent to a modem client */
 static boolean distributed_slow_action_due[HALO_PORT_MAXIMUM_NETWORK_MACHINES][MAXIMUM_TRACKED_PLAYERS];
 boolean distributed_machine_slow_line(long machine_index)
 {
 	return distributed_client_build_known[machine_index] &&
 		strstr(distributed_client_builds[machine_index].mods, "dce-modem") != NULL;
+}
+short distributed_machine_slow_period(long machine_index)
+{
+	if (machine_index < 0 || machine_index >= HALO_PORT_MAXIMUM_NETWORK_MACHINES || !distributed_machine_slow_line(machine_index))
+		return 1;
+	return distributed_slow_period[machine_index] ? distributed_slow_period[machine_index] : DCE_SLOW_LINE_PERIOD_TICKS;
+}
+static long distributed_slow_budget(void)
+{
+	static long budget = -1;
+
+	if (budget < 0)
+	{
+		char const *value = getenv("HALO_DCE_MODEM_BUDGET");
+
+		budget = value ? atol(value) : DCE_SLOW_BUDGET_DEFAULT;
+		if (budget < 600)
+			budget = 600;
+	}
+	return budget;
+}
+/* once a tick: each modem client's bytes over the last second move its period */
+static void distributed_slow_adapt(void)
+{
+	long now = game_time_get();
+	long machine_index;
+
+	for (machine_index = 0; machine_index < HALO_PORT_MAXIMUM_NETWORK_MACHINES; machine_index++)
+	{
+		long ticks = now - distributed_slow_window_start[machine_index];
+
+		if (!distributed_machine_slow_line(machine_index))
+		{
+			distributed_slow_period[machine_index] = 0;
+			distributed_slow_bytes[machine_index] = 0;
+			distributed_slow_window_start[machine_index] = now;
+			distributed_slow_windows[machine_index] = 0;
+			continue;
+		}
+		if (ticks < 0)
+			distributed_slow_window_start[machine_index] = now, distributed_slow_bytes[machine_index] = 0;
+		else if (ticks >= DCE_SLOW_WINDOW_TICKS)
+		{
+			long rate = distributed_slow_bytes[machine_index] * DCE_SLOW_WINDOW_TICKS / ticks;
+			short period = distributed_machine_slow_period(machine_index);
+			long budget = distributed_slow_budget();
+
+			if (rate > budget && period < DCE_SLOW_PERIOD_MAX)
+				period++;
+			else if (rate * 10 < budget * 6 && period > DCE_SLOW_PERIOD_MIN)
+				period--;
+			distributed_slow_period[machine_index] = period;
+			if (distributed_slow_windows[machine_index]++ % 10 == 0)
+				platform_log("network: dce-modem machine %ld sent %ld B/s, period %d ticks (budget %ld)",
+					machine_index, rate, period, budget);
+			distributed_slow_bytes[machine_index] = 0;
+			distributed_slow_window_start[machine_index] = now;
+		}
+	}
 }
 static boolean distributed_build_sent;
 static boolean distributed_identity_sent;
@@ -1021,6 +1091,9 @@ static void distributed_batch_flush(
 	header->game_time = game_time_get();
 	header->header = 0;
 	build_message_header(&header->header, batch->size, 2, 0);
+	if (sender != HOST_SENDER && sender >= 0 && sender < HALO_PORT_MAXIMUM_NETWORK_MACHINES &&
+		distributed_machine_slow_line(sender))
+		distributed_slow_bytes[sender] += batch->size + DCE_SLOW_WIRE_OVERHEAD;
 	if (sender == HOST_SENDER)
 		network_distributed_client_send(batch->data, batch->size);
 	else
@@ -3275,7 +3348,7 @@ static void distributed_host_plan_players(
 			mods name dce-modem) gets each player every 3rd tick at most, its own too */
 			if (distributed_machine_slow_line(machine_index))
 			{
-				period = MAX(period, DCE_SLOW_LINE_PERIOD_TICKS);
+				period = MAX(period, distributed_machine_slow_period(machine_index));
 				send = FALSE;
 			}
 			send |= changed[player_index] || (now + player_index) % period == 0;
@@ -3291,7 +3364,7 @@ static void distributed_host_plan_players(
 					distributed_slow_action_due[machine_index][player_index] = TRUE;
 				if (!own && has_action[player_index] && (send ||
 					(distributed_slow_action_due[machine_index][player_index] &&
-						(now + player_index) % DCE_SLOW_LINE_PERIOD_TICKS == 0)))
+						(now + player_index) % distributed_machine_slow_period(machine_index) == 0)))
 				{
 					SET_FLAG(*sends, _distributed_send_action_bit, TRUE);
 					distributed_slow_action_due[machine_index][player_index] = FALSE;
@@ -3900,6 +3973,7 @@ void network_distributed_tick(
 		profile_scope(distributed_tick_apply_predictions_section, distributed_apply_predictions();)
 		profile_scope(distributed_tick_apply_vehicle_predictions_section, network_objects_apply_vehicle_predictions();)
 		profile_scope(distributed_tick_objects_host_tick_section, network_objects_host_tick();)
+		distributed_slow_adapt();
 		profile_scope(distributed_tick_plan_players_section, distributed_host_plan_players();)
 		profile_scope(distributed_tick_damage_host_tick_section, network_damage_host_tick();)
 		if (distributed_statistics_due || game_time_get() % STATISTICS_INTERVAL_TICKS == 0)

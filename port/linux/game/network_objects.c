@@ -1500,7 +1500,7 @@ static boolean distributed_host_rest_state_due(
 		since < REST_STATE_REPEATS * REST_STATE_REPEAT_TICKS && since % REST_STATE_REPEAT_TICKS == 0;
 }
 
-#define DCE_SLOW_REST_PERIOD_TICKS 10
+#define DCE_SLOW_REST_PERIOD_TICKS 10 /* at a period of 3; it scales with the client's period */
 static long objects_host_slow_rest_cursors[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 
 /* where the moving objects are, to each client those near its players
@@ -1564,6 +1564,8 @@ static void distributed_host_send_states(
 		short count = 0;
 		long index;
 		boolean slow = distributed_machine_slow_line(machine_index);
+		short slow_period = distributed_machine_slow_period(machine_index);
+		long slow_rest = MAX(DCE_SLOW_REST_PERIOD_TICKS, DCE_SLOW_REST_PERIOD_TICKS * slow_period / 3);
 
 		for (index = 0; index < state_count; index++)
 		{
@@ -1588,8 +1590,8 @@ static void distributed_host_send_states(
 				short period = own_vehicle != NONE ? OWN_VEHICLE_PERIOD_TICKS :
 					distributed_host_object_period(machine_number, &states[index].position);
 
-				if (slow && period < 3)
-					period = 3;
+				if (slow && period < slow_period)
+					period = slow_period;
 
 				if ((game_time_get() + (own_vehicle != NONE ? 0 : DATUM_INDEX_TO_ABSOLUTE_INDEX(states[index].object_index))) %
 					period != 0)
@@ -1624,7 +1626,7 @@ static void distributed_host_send_states(
 		}
 		/* DCE official server: a modem's round of objects at rest, one batch every
 		DCE_SLOW_REST_PERIOD_TICKS from a cursor of its own, so it reaches all of them */
-		if (slow && told_count && game_time_get() % DCE_SLOW_REST_PERIOD_TICKS == 0)
+		if (slow && told_count && game_time_get() % slow_rest == 0)
 		{
 			short taken = 0;
 
