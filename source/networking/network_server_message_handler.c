@@ -703,6 +703,9 @@ static void network_game_server_clean_player_name(
 	}
 }
 
+#include <stdlib.h>
+void platform_log(const char *format, ...);
+
 static boolean network_game_server_write(
 	struct network_connection *connection,
 	void *message,
@@ -710,6 +713,23 @@ static boolean network_game_server_write(
 	struct transport_address *destination_address,
 	boolean reliable)
 {
+	static int wire_log = -1;
+
+	if (wire_log < 0)
+	{
+		char const *value = getenv("HALO_DCE_WIRE_LOG");
+
+		wire_log = value && value[0] == '1';
+	}
+	/* (HALO_DCE_WIRE_LOG=1: each large reliable write, what it starts with) */
+	if (wire_log && reliable && buffer_size >= 256)
+	{
+		byte const *bytes = (byte const *)message;
+
+		platform_log("network: reliable write %u B class %u: %02x %02x %02x %02x %02x %02x %02x %02x",
+			(unsigned)buffer_size, (unsigned)GET_MESSAGE_TYPE(*(word const *)message), bytes[2], bytes[3], bytes[4],
+			bytes[5], bytes[6], bytes[7], bytes[8], bytes[9]);
+	}
 	return network_connection_write(
 		connection,
 		message,
