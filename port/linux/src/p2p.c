@@ -886,6 +886,17 @@ static void packet_nonce(const unsigned char *packet, unsigned char *nonce)
 	memcpy(nonce + P2P_NONCE_SIZE - 8, packet + 1 + P2P_IDENTIFIER_SIZE, 8);
 }
 
+/* DCE: HALO_DCE_WIRE_LOG=1, the tunnel's packets each way per peer by kind, logged each second
+(kinds: 0 ping, 1 pong, 2 game datagram, 3 KCP push, 4 KCP ack, 5 KCP other, 6 bye; bytes on the
+wire, IP and UDP included) */
+enum { WIRE_KINDS = 7, WIRE_IP_UDP = 28 };
+static int wire_log = -1;
+static unsigned long wire_time;
+static long wire_count[P2P_MAXIMUM_PEERS][2][WIRE_KINDS];
+static long wire_bytes[P2P_MAXIMUM_PEERS][2][WIRE_KINDS];
+static void wire_note(const struct peer *peer, int incoming, const unsigned char *inner, int size, int wire);
+static void wire_report(void);
+
 static void peer_send_to(struct peer *peer, const struct p2p_candidate *to, const unsigned char *inner, int size)
 {
 	unsigned char packet[MAXIMUM_PACKET_SIZE];
@@ -914,6 +925,7 @@ static void peer_send_to(struct peer *peer, const struct p2p_candidate *to, cons
 	}
 	make_address(&address, to->address, to->port);
 	posix_socket_sendto(p2p.tunnel_socket, packet, TUNNEL_HEADER_SIZE + sealed, 0, &address, sizeof(address));
+	wire_note(peer, 0, inner, size, TUNNEL_HEADER_SIZE + sealed + WIRE_IP_UDP);
 }
 
 /* to a peer the tunnel has reached; dropped otherwise */
@@ -1260,9 +1272,77 @@ static void peer_heard(struct peer *peer, unsigned long address, unsigned short 
 	}
 }
 
+static int wire_kind(const unsigned char *inner, int size)
+{
+	switch (inner[0])
+	{
+	case _packet_ping: return 0;
+	case _packet_pong: return 1;
+	case _packet_datagram: return 2;
+	case _packet_stream: return size >= 6 ? (inner[5] == 81 ? 3 : inner[5] == 82 ? 4 : 5) : 5;
+	default: return 6;
+	}
+}
+
+static void wire_note(const struct peer *peer, int incoming, const unsigned char *inner, int size, int wire)
+{
+	int peer_index = (int)(peer - p2p.peers);
+	int kind;
+
+	if (wire_log < 0)
+	{
+		const char *value = getenv("HALO_DCE_WIRE_LOG");
+
+		wire_log = value && value[0] == '1';
+	}
+	if (!wire_log || size < 1 || peer_index < 0 || peer_index >= P2P_MAXIMUM_PEERS)
+		return;
+	kind = wire_kind(inner, size);
+	wire_count[peer_index][incoming][kind]++;
+	wire_bytes[peer_index][incoming][kind] += wire;
+}
+
+static void wire_report(void)
+{
+	static const char *const names[WIRE_KINDS] = { "ping", "pong", "dgram", "push", "ack", "kcp", "bye" };
+	unsigned long now = p2p_now();
+	int index;
+
+	if (wire_log <= 0 || !elapsed(wire_time, 1000))
+		return;
+	wire_time = now;
+	for (index = 0; index < P2P_MAXIMUM_PEERS; index++)
+	{
+		char line[512];
+		int length = 0;
+		int way;
+		long total = 0;
+
+		for (way = 0; way < 2; way++)
+		{
+			int kind;
+
+			length += snprintf(line + length, sizeof(line) - (size_t)length, "%s", way ? " | in" : "out");
+			for (kind = 0; kind < WIRE_KINDS; kind++)
+			{
+				total += wire_count[index][way][kind];
+				if (wire_count[index][way][kind])
+					length += snprintf(line + length, sizeof(line) - (size_t)length, " %s %ld/%ldB", names[kind],
+						wire_count[index][way][kind], wire_bytes[index][way][kind]);
+				wire_count[index][way][kind] = 0;
+				wire_bytes[index][way][kind] = 0;
+			}
+		}
+		if (total)
+			platform_log("tunnel wire: peer %d %s", index, line);
+	}
+}
+
 static void update_peers(void)
 {
 	int index;
+
+	wire_report();
 
 	for (index = 0; index < P2P_MAXIMUM_PEERS; index++)
 	{
@@ -2529,6 +2609,7 @@ static void tunnel_received(const unsigned char *packet, int size, const struct 
 		return;
 	newest = counter > peer->receive_highest;
 	packet_received(peer, counter);
+	wire_note(peer, 1, inner, inner_size, size + WIRE_IP_UDP);
 	peer_heard(peer, from->sin_addr.s_addr, from->sin_port, newest);
 	switch (inner[0])
 	{
