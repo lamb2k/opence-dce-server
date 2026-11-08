@@ -1270,6 +1270,44 @@ static word distributed_entry_size(
 	return (word)(entries_size / count);
 }
 
+/* HALO_DCE_WIRE_LOG=1: the reliable messages to the clients by type, logged each second */
+static long distributed_reliable_count[256];
+static long distributed_reliable_bytes[256];
+static long distributed_reliable_time;
+static void distributed_reliable_note(byte type, word size)
+{
+	static int on = -1;
+	long now = game_time_get();
+
+	if (on < 0)
+	{
+		char const *value = getenv("HALO_DCE_WIRE_LOG");
+
+		on = value && value[0] == '1';
+	}
+	if (!on)
+		return;
+	distributed_reliable_count[type]++;
+	distributed_reliable_bytes[type] += size;
+	if (now - distributed_reliable_time >= DCE_SLOW_WINDOW_TICKS || now < distributed_reliable_time)
+	{
+		char line[400];
+		int length = 0;
+		short index;
+
+		for (index = 0; index < 256; index++)
+		{
+			if (distributed_reliable_count[index] && length < (int)sizeof(line) - 32)
+				length += snprintf(line + length, sizeof(line) - (size_t)length, " t%d %ld/%ldB", index,
+					distributed_reliable_count[index], distributed_reliable_bytes[index]);
+			distributed_reliable_count[index] = 0;
+			distributed_reliable_bytes[index] = 0;
+		}
+		distributed_reliable_time = now;
+		platform_log("network: reliable to clients:%s", length ? line : " none");
+	}
+}
+
 void distributed_send(
 	void *message,
 	byte type,
@@ -1290,7 +1328,10 @@ void distributed_send(
 			distributed_batch_add((short)machine_indices[index], message, size, distributed_entry_size(count, size));
 		break;
 	}
-	case _distributed_to_clients_reliably: network_distributed_server_send_to_all_reliably(message, size); break;
+	case _distributed_to_clients_reliably:
+		distributed_reliable_note(type, size);
+		network_distributed_server_send_to_all_reliably(message, size);
+		break;
 	case _distributed_to_host:
 		distributed_batch_add(HOST_SENDER, message, size, distributed_entry_size(count, size));
 		break;
