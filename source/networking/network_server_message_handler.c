@@ -1122,6 +1122,11 @@ line, its stream still full of an earlier copy). Only those are sent it again,
 the latest settings in place of the refused copy; a machine that took it is
 not sent another full copy for someone else's miss. */
 static boolean network_game_settings_machine_pending[MAXIMUM_NETWORK_MACHINE_COUNT];
+/* the tunnel's unacknowledged bytes to a machine (port/linux/src/p2p.c; -1: not on the tunnel) */
+long p2p_queued_bytes(unsigned long game_address);
+/* more than this still queued to a machine (an earlier settings copy, most of
+14 KB, on a modem line): the new copy waits, and the latest goes when it drains */
+#define NETWORK_GAME_SETTINGS_HOLD_BYTES 2400
 
 static boolean network_game_server_send_game_settings_to_machines(
 	struct network_game_server *server,
@@ -1157,6 +1162,17 @@ static boolean network_game_server_send_game_settings_to_machines(
 		}
 		if (only_pending && !network_game_settings_machine_pending[machine_index])
 			continue;
+		{
+			struct transport_address address;
+
+			network_connection_get_address(connection, &address, NULL);
+			if (p2p_queued_bytes(address.address.long_words[0]) > NETWORK_GAME_SETTINGS_HOLD_BYTES)
+			{
+				network_game_settings_machine_pending[machine_index] = TRUE;
+				result = FALSE;
+				continue;
+			}
+		}
 		network_game_settings_machine_pending[machine_index] =
 			!network_game_server_send_game_settings_to_client_machine(server, machine, game, game_size);
 		if (network_game_settings_machine_pending[machine_index])

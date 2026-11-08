@@ -4169,6 +4169,26 @@ static void peer_set_slow_streams(struct peer *peer, int slow)
 
 /* DCE official server: called each match tick for a modem client; out of a match
 (join, settings, lobby, map load) nobody calls it and the line is unthrottled */
+/* DCE official server: the reliable bytes still queued to a peer, sent or not
+but not yet acknowledged (-1: not a tunnel peer) */
+long p2p_queued_bytes(unsigned long game_address)
+{
+	struct peer *peer = find_peer_by_address(network_long(game_address));
+	long bytes = 0;
+	int index;
+
+	if (!peer || !peer->connected)
+		return -1;
+	for (index = 0; index < MAXIMUM_STREAMS; index++)
+	{
+		struct stream *stream = &p2p.streams[index];
+
+		if (stream->used && stream->kcp && &p2p.peers[stream->peer] == peer)
+			bytes += (long)ikcp_waitsnd(stream->kcp) * (long)stream->kcp->mss;
+	}
+	return bytes;
+}
+
 void p2p_set_slow_line(unsigned long game_address)
 {
 	struct peer *peer = find_peer_by_address(network_long(game_address));
