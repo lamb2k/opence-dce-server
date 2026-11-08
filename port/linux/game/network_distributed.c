@@ -713,10 +713,14 @@ static short distributed_slow_period[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 static short distributed_slow_windows[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 /* a change of a player's action not yet sent to a modem client */
 static boolean distributed_slow_action_due[HALO_PORT_MAXIMUM_NETWORK_MACHINES][MAXIMUM_TRACKED_PLAYERS];
+/* (the tunnel's own guess, refreshed each match tick in distributed_slow_adapt) */
+int p2p_peer_is_modem(unsigned long game_address);
+static boolean distributed_tunnel_modem[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 boolean distributed_machine_slow_line(long machine_index)
 {
-	return distributed_client_build_known[machine_index] &&
-		strstr(distributed_client_builds[machine_index].mods, "dce-modem") != NULL;
+	return distributed_tunnel_modem[machine_index] ||
+		(distributed_client_build_known[machine_index] &&
+		strstr(distributed_client_builds[machine_index].mods, "dce-modem") != NULL);
 }
 short distributed_machine_slow_period(long machine_index)
 {
@@ -761,6 +765,12 @@ static void distributed_slow_adapt(void)
 	long machine_index;
 	short slow_count = 0;
 
+	for (machine_index = 0; machine_index < HALO_PORT_MAXIMUM_NETWORK_MACHINES; machine_index++)
+	{
+		unsigned long address = network_distributed_machine_address(machine_index);
+
+		distributed_tunnel_modem[machine_index] = address && p2p_peer_is_modem(address);
+	}
 	for (machine_index = 0; machine_index < HALO_PORT_MAXIMUM_NETWORK_MACHINES; machine_index++)
 	{
 		long ticks = now - distributed_slow_window_start[machine_index];

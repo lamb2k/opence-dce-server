@@ -235,6 +235,13 @@ struct peer
 	match tick): not named for SLOW_LINE_HOLD, its streams go back to turbo,
 	so join, settings, lobby and map load are never batched */
 	unsigned long slow_seen;
+	/* DCE: the largest receive window its streams have offered (a Dreamcast's
+	tunnel offers 32 segments, a PC's 256), its smoothed round trip, and whether
+	that marks it a modem line (p2p_peer_is_modem) */
+	unsigned long max_remote_window;
+	long srtt;
+	int modem_guess;
+	int modem_logged;
 };
 
 /* a UDP stand-in for one port of a peer */
@@ -4171,6 +4178,44 @@ static void peer_set_slow_streams(struct peer *peer, int slow)
 (join, settings, lobby, map load) nobody calls it and the line is unthrottled */
 /* DCE official server: the reliable bytes still queued to a peer, sent or not
 but not yet acknowledged (-1: not a tunnel peer) */
+/* DCE official server: a Dreamcast's streams (a receive window of at most
+MODEM_WINDOW segments) whose round trip is at least MODEM_RTT ms are a modem
+line's, whatever the client says (it tells only once the map has loaded) */
+enum { MODEM_WINDOW = 32, MODEM_RTT = 120 };
+
+int p2p_peer_is_modem(unsigned long game_address)
+{
+	struct peer *peer = find_peer_by_address(network_long(game_address));
+	int index;
+
+	if (!peer || !peer->connected)
+		return 0;
+	if (peer->modem_guess)
+		return 1;
+	for (index = 0; index < MAXIMUM_STREAMS; index++)
+	{
+		struct stream *stream = &p2p.streams[index];
+
+		/* (a window only once it has heard from the stream: before, KCP's default) */
+		if (stream->used && stream->kcp && &p2p.peers[stream->peer] == peer && stream->kcp->rx_srtt > 0)
+		{
+			if (stream->kcp->rmt_wnd > peer->max_remote_window)
+				peer->max_remote_window = stream->kcp->rmt_wnd;
+			if (stream->kcp->rx_srtt > peer->srtt)
+				peer->srtt = stream->kcp->rx_srtt;
+		}
+	}
+	if (peer->max_remote_window && peer->max_remote_window <= MODEM_WINDOW && peer->srtt >= MODEM_RTT)
+	{
+		peer->modem_guess = 1;
+		if (!peer->modem_logged)
+			platform_log("Internet play: %s looks like a Dreamcast on a modem (window %lu, round trip %ld ms)",
+				peer->name, peer->max_remote_window, peer->srtt);
+		peer->modem_logged = 1;
+	}
+	return peer->modem_guess;
+}
+
 long p2p_queued_bytes(unsigned long game_address)
 {
 	struct peer *peer = find_peer_by_address(network_long(game_address));
