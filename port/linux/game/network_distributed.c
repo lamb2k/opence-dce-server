@@ -696,7 +696,7 @@ static boolean distributed_client_build_known[HALO_PORT_MAXIMUM_NETWORK_MACHINES
 #define DCE_SLOW_PERIOD_MAX 10
 #define DCE_SLOW_WINDOW_TICKS 30 /* one second */
 #define DCE_SLOW_WIRE_OVERHEAD 36 /* IP, UDP and tunnel bytes on each datagram */
-#define DCE_SLOW_BUDGET_DEFAULT 2400 /* of a 33.6k line's 3360 B/s, room for upload acks and retries */
+#define DCE_SLOW_BUDGET_DEFAULT 1700 /* counted bytes; at 33.6k (3360 B/s) the line then carries about 1.8 KB/s with acks and the reliable stream */
 /* DCE official server: per modem client, a period that follows the bytes it is sent */
 static long distributed_slow_bytes[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 static long distributed_slow_window_start[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
