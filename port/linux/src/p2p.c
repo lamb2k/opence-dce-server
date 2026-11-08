@@ -136,6 +136,7 @@ enum
 	of that ended the stream (the console dropped at the match end) */
 	SLOW_KCP_WINDOW = 8,
 	SLOW_KCP_MIN_RTO = 1000,
+	SLOW_KCP_MAX_RTO = 3000,
 	SLOW_KCP_DEAD_LINK = 60,
 	/* a modem peer's whole wire (every kind), bytes a second, and the burst it may take */
 	SLOW_WIRE_RATE_DEFAULT = 2400,
@@ -2449,6 +2450,7 @@ static void stream_tune(ikcpcb *kcp, int slow)
 		/* (no fast resend on duplicate acknowledgements: on a modem line those are queueing, not loss) */
 		ikcp_nodelay(kcp, 1, SLOW_STREAM_INTERVAL, 0, 1);
 		kcp->rx_minrto = SLOW_KCP_MIN_RTO;
+		kcp->rx_maxrto = SLOW_KCP_MAX_RTO;
 		kcp->snd_wnd = SLOW_KCP_WINDOW;
 		kcp->dead_link = SLOW_KCP_DEAD_LINK;
 	}
@@ -2457,7 +2459,10 @@ static void stream_tune(ikcpcb *kcp, int slow)
 		ikcp_nodelay(kcp, 1, LOOP_INTERVAL, 2, 1);
 		ikcp_wndsize(kcp, 256, 256);
 		kcp->dead_link = 20; /* (KCP's own) */
+		kcp->rx_maxrto = 60000;
 	}
+	if (kcp->rx_rto > kcp->rx_maxrto)
+		kcp->rx_rto = kcp->rx_maxrto;
 	ikcp_setmtu(kcp, slow ? SLOW_KCP_MTU : KCP_MTU);
 }
 

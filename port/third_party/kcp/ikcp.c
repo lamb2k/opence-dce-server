@@ -277,6 +277,7 @@ ikcpcb* ikcp_create(IUINT32 conv, void *user)
 	kcp->rx_rttval = 0;
 	kcp->rx_rto = IKCP_RTO_DEF;
 	kcp->rx_minrto = IKCP_RTO_MIN;
+	kcp->rx_maxrto = (IINT32)IKCP_RTO_MAX;
 	kcp->current = 0;
 	kcp->interval = IKCP_INTERVAL;
 	kcp->ts_flush = IKCP_INTERVAL;
@@ -567,7 +568,7 @@ static void ikcp_update_ack(ikcpcb *kcp, IINT32 rtt)
 		if (kcp->rx_srtt < 1) kcp->rx_srtt = 1;
 	}
 	rto = kcp->rx_srtt + _imax_(kcp->interval, 4 * kcp->rx_rttval);
-	kcp->rx_rto = _ibound_(kcp->rx_minrto, rto, IKCP_RTO_MAX);
+	kcp->rx_rto = _ibound_(kcp->rx_minrto, rto, (IUINT32)kcp->rx_maxrto);
 	if (kcp->ccops && kcp->ccops->on_rtt) {
 		kcp->ccops->on_rtt(kcp, rtt);
 	}
@@ -1134,6 +1135,9 @@ void ikcp_flush(ikcpcb *kcp)
 					((IINT32)(segment->rto)) : kcp->rx_rto;
 				segment->rto += step / 2;
 			}
+			/* (port: a line slow enough to need it caps how far a resend's wait grows) */
+			if (segment->rto > (IUINT32)kcp->rx_maxrto)
+				segment->rto = (IUINT32)kcp->rx_maxrto;
 			segment->resendts = current + segment->rto;
 			lost = 1;
 		}
