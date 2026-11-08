@@ -40,6 +40,7 @@ boolean network_distributed_server_write_machine_reliably(long machine_index, vo
 unsigned long network_distributed_machine_address(long machine_index);
 long p2p_unsent_bytes(unsigned long game_address);
 long p2p_slow_wire_rate(void);
+void p2p_stream_debug(unsigned long game_address, char *out, long size);
 
 enum
 {
@@ -408,9 +409,13 @@ void network_reliable_pump(void)
 			reliable_release(machine_index, state, !distributed_machine_slow_line(machine_index));
 		if (log && (state->sent_messages || state->queue_peak))
 		{
-			platform_log("network: reliable to machine %ld: %ld messages %ld B, %ld paced records out, queue %ld now (peak %ld)",
+			char streams[300];
+
+			p2p_stream_debug(network_distributed_machine_address(machine_index), streams, (long)sizeof(streams));
+			platform_log("network: reliable to machine %ld: %ld messages %ld B, %ld paced records out, queue %ld now (peak %ld), unsent %ld, hold %ld%s",
 				machine_index, state->sent_messages, state->sent_bytes, state->paced_released, state->queue_count,
-				state->queue_peak);
+				state->queue_peak, p2p_unsent_bytes(network_distributed_machine_address(machine_index)), reliable_hold_bytes(),
+				streams);
 			state->sent_messages = 0;
 			state->sent_bytes = 0;
 			state->paced_released = 0;

@@ -4378,6 +4378,32 @@ long p2p_unsent_bytes(unsigned long game_address)
 	return bytes;
 }
 
+/* HALO_DCE_WIRE_LOG: how a machine's streams stand (queue behind the window, in flight, the peer's window, bytes
+the game wrote that the tunnel has not read), written into out */
+void p2p_stream_debug(unsigned long game_address, char *out, long size)
+{
+	struct peer *peer = find_peer_by_address(network_long(game_address));
+	long length = 0;
+	int index;
+
+	out[0] = 0;
+	if (!peer || !peer->connected)
+		return;
+	for (index = 0; index < MAXIMUM_STREAMS && length < size - 80; index++)
+	{
+		struct stream *stream = &p2p.streams[index];
+		posix_ulong available = 0;
+
+		if (!stream->used || !stream->kcp || &p2p.peers[stream->peer] != peer)
+			continue;
+		if (stream->socket >= 0)
+			posix_socket_bytes_available(stream->socket, &available);
+		length += snprintf(out + length, (size_t)(size - length), " [s%d que %u buf %u wnd %u/%u rto %d sock %lu]", index,
+			(unsigned)stream->kcp->nsnd_que, (unsigned)stream->kcp->nsnd_buf, (unsigned)stream->kcp->snd_wnd,
+			(unsigned)stream->kcp->rmt_wnd, (int)stream->kcp->rx_rto, (unsigned long)available);
+	}
+}
+
 void p2p_set_slow_line(unsigned long game_address)
 {
 	struct peer *peer = find_peer_by_address(network_long(game_address));
