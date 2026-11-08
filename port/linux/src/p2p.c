@@ -127,6 +127,11 @@ enum
 	small reliable messages and their acks share packets */
 	SLOW_STREAM_INTERVAL = 100,
 	SLOW_LINE_HOLD = 2000,
+	/* a modem peer's stream pieces: small, so one lost piece costs little */
+	SLOW_KCP_MTU = 524,
+	/* a modem peer's whole wire (every kind), bytes a second, and the burst it may take */
+	SLOW_WIRE_RATE_DEFAULT = 2400,
+	SLOW_WIRE_DEPTH = 600,
 	PUNCH_INTERVAL = 200,
 	PING_INTERVAL = 1000,
 	ENDPOINT_SWITCH_TIME = 3000,
@@ -242,6 +247,10 @@ struct peer
 	long srtt;
 	int modem_guess;
 	int modem_logged;
+	/* its wire bucket (bytes; below 0 the game's datagrams wait their turn, dropped) */
+	long wire_tokens;
+	unsigned long wire_tokens_time;
+	long wire_dropped;
 };
 
 /* a UDP stand-in for one port of a peer */
@@ -918,6 +927,36 @@ static long wire_bytes[P2P_MAXIMUM_PEERS][2][WIRE_KINDS];
 static void wire_note(const struct peer *peer, int incoming, const unsigned char *inner, int size, int wire);
 static void wire_report(void);
 
+static long slow_wire_rate(void)
+{
+	static long rate = -1;
+
+	if (rate < 0)
+	{
+		char const *value = getenv("HALO_DCE_MODEM_WIRE");
+
+		rate = value ? atol(value) : SLOW_WIRE_RATE_DEFAULT;
+		if (rate < 800)
+			rate = 800;
+	}
+	return rate;
+}
+
+/* a modem peer's bucket, filled to now */
+static long peer_wire_tokens(struct peer *peer)
+{
+	unsigned long now = p2p_now();
+
+	if (!peer->wire_tokens_time)
+		peer->wire_tokens = SLOW_WIRE_DEPTH;
+	else
+		peer->wire_tokens += (long)((now - peer->wire_tokens_time) * (unsigned long)slow_wire_rate() / 1000);
+	if (peer->wire_tokens > SLOW_WIRE_DEPTH)
+		peer->wire_tokens = SLOW_WIRE_DEPTH;
+	peer->wire_tokens_time = now;
+	return peer->wire_tokens;
+}
+
 static void peer_send_to(struct peer *peer, const struct p2p_candidate *to, const unsigned char *inner, int size)
 {
 	unsigned char packet[MAXIMUM_PACKET_SIZE];
@@ -947,6 +986,11 @@ static void peer_send_to(struct peer *peer, const struct p2p_candidate *to, cons
 	make_address(&address, to->address, to->port);
 	posix_socket_sendto(p2p.tunnel_socket, packet, TUNNEL_HEADER_SIZE + sealed, 0, &address, sizeof(address));
 	peer->wire_out += TUNNEL_HEADER_SIZE + sealed + WIRE_IP_UDP;
+	if (peer->slow_line)
+	{
+		peer_wire_tokens(peer);
+		peer->wire_tokens -= TUNNEL_HEADER_SIZE + sealed + WIRE_IP_UDP;
+	}
 	wire_note(peer, 0, inner, size, TUNNEL_HEADER_SIZE + sealed + WIRE_IP_UDP);
 }
 
@@ -1028,6 +1072,21 @@ static void drop_peer(struct peer *peer, const char *reason)
 	{
 		platform_log("Internet play: %s %s: %s", peer->is_host && !peer->is_player ? "host" : "player", peer->name,
 			reason);
+	}
+	/* (a modem peer: what its streams still had unacknowledged as it went) */
+	if (peer->slow_line || peer->modem_guess)
+	{
+		int index;
+
+		for (index = 0; index < MAXIMUM_STREAMS; index++)
+		{
+			struct stream *stream = &p2p.streams[index];
+
+			if (stream->used && stream->kcp && &p2p.peers[stream->peer] == peer && ikcp_waitsnd(stream->kcp))
+				platform_log("Internet play: %s left stream %d with %d pieces unacknowledged (first %u, next %u), %ld datagrams held back",
+					peer->name, index, ikcp_waitsnd(stream->kcp), (unsigned)stream->kcp->snd_una,
+					(unsigned)stream->kcp->snd_nxt, peer->wire_dropped);
+		}
 	}
 	if (peer->connected)
 	{
@@ -1385,7 +1444,9 @@ static void update_peers(void)
 
 		if (!peer->used)
 			continue;
-		if (peer->slow_line && elapsed(peer->slow_seen, SLOW_LINE_HOLD))
+		/* (one the tunnel found on a modem stays paced till it leaves: postgame
+		and the next lobby too; before that, join and settings go unthrottled) */
+		if (peer->slow_line && !peer->modem_guess && elapsed(peer->slow_seen, SLOW_LINE_HOLD))
 			peer_set_slow_streams(peer, 0);
 		if (peer->connected)
 		{
@@ -2282,6 +2343,14 @@ static void datagram_send(struct peer *peer, unsigned short source_port, unsigne
 
 	if (size < 0 || size > MAXIMUM_INNER_SIZE - 5)
 		return;
+	/* (a modem peer's line full: the game's datagram, a state the next one
+	repeats, gives way to the stream; its bytes are counted in peer_send_to) */
+	if (peer->slow_line && peer_wire_tokens(peer) < 0)
+	{
+		if (++peer->wire_dropped % 100 == 1)
+			platform_log("Internet play: %s's line is full: %ld datagrams held back so far", peer->name, peer->wire_dropped);
+		return;
+	}
 	/* (the peer answers to that port) */
 	if (!game_port_open(0, source_port))
 		p2p.sent_ports[p2p.sent_port_next++ % MAXIMUM_SENT_PORTS] = source_port;
@@ -2374,7 +2443,7 @@ static struct stream *stream_new(int peer_index, IUINT32 conversation)
 		else
 			ikcp_nodelay(stream->kcp, 1, LOOP_INTERVAL, 2, 1);
 		ikcp_wndsize(stream->kcp, 256, 256);
-		ikcp_setmtu(stream->kcp, KCP_MTU);
+		ikcp_setmtu(stream->kcp, p2p.peers[peer_index].slow_line ? SLOW_KCP_MTU : KCP_MTU);
 		return stream;
 	}
 	return NULL;
@@ -4165,6 +4234,7 @@ static void peer_set_slow_streams(struct peer *peer, int slow)
 				ikcp_nodelay(stream->kcp, 0, SLOW_STREAM_INTERVAL, 0, 0);
 			else
 				ikcp_nodelay(stream->kcp, 1, LOOP_INTERVAL, 2, 1);
+			ikcp_setmtu(stream->kcp, slow ? SLOW_KCP_MTU : KCP_MTU);
 		}
 	}
 	if (slow)
