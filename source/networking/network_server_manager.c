@@ -1304,7 +1304,7 @@ struct network_game_server *network_game_server_create(
 	{
 		server->connection = network_connection_new(
 			FLAG(_connection_create_server_bit),
-			NETWORK_GAME_SERVER_PORT);
+			network_game_server_local_port());
 
 		if (server->connection != NULL)
 		{

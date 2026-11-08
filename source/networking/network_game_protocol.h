@@ -16,6 +16,10 @@ enum
 	NETWORK_GAME_CLIENT_PORT = 0x141F,
 };
 
+/* DCE: the port this machine's game server binds (network.game_port, default
+NETWORK_GAME_SERVER_PORT); peers always see NETWORK_GAME_SERVER_PORT */
+unsigned short network_game_server_local_port(void);
+
 enum
 {
 	_rejection_code_version_too_old = 0,
