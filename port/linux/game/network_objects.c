@@ -1567,6 +1567,9 @@ static void distributed_host_send_states(
 		short slow_period = distributed_machine_slow_period(machine_index);
 		long slow_rest = MAX(DCE_SLOW_REST_PERIOD_TICKS, DCE_SLOW_REST_PERIOD_TICKS * slow_period / 3);
 
+		/* (a whole number of its periods: the round goes with the rest of its batch) */
+		slow_rest = (slow_rest + slow_period - 1) / slow_period * slow_period;
+
 		for (index = 0; index < state_count; index++)
 		{
 			struct distributed_object_state *state = &message.states[count];
@@ -1593,7 +1596,8 @@ static void distributed_host_send_states(
 				if (slow && period < slow_period)
 					period = slow_period;
 
-				if ((game_time_get() + (own_vehicle != NONE ? 0 : DATUM_INDEX_TO_ABSOLUTE_INDEX(states[index].object_index))) %
+				/* (a modem client's all on one tick of its period: one datagram) */
+				if ((game_time_get() + (own_vehicle != NONE || slow ? 0 : DATUM_INDEX_TO_ABSOLUTE_INDEX(states[index].object_index))) %
 					period != 0)
 				{
 					continue;

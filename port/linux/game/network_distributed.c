@@ -3392,7 +3392,9 @@ static void distributed_host_plan_players(
 				period = MAX(period, distributed_machine_slow_period(machine_index));
 				send = FALSE;
 			}
-			send |= changed[player_index] || (now + player_index) % period == 0;
+			/* (a modem client's players all on one tick of its period: one datagram) */
+			send |= changed[player_index] ||
+				(now + (distributed_machine_slow_line(machine_index) ? 0 : player_index)) % period == 0;
 			if (seen || own)
 				SET_FLAG(*sends, _distributed_send_sees_bit, TRUE);
 			if (send || (own && !distributed_machine_slow_line(machine_index)))
@@ -3405,7 +3407,7 @@ static void distributed_host_plan_players(
 					distributed_slow_action_due[machine_index][player_index] = TRUE;
 				if (!own && has_action[player_index] && (send ||
 					(distributed_slow_action_due[machine_index][player_index] &&
-						(now + player_index) % distributed_machine_slow_period(machine_index) == 0)))
+						now % distributed_machine_slow_period(machine_index) == 0)))
 				{
 					SET_FLAG(*sends, _distributed_send_action_bit, TRUE);
 					distributed_slow_action_due[machine_index][player_index] = FALSE;
