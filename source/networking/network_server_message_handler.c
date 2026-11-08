@@ -910,6 +910,27 @@ boolean network_distributed_server_send_to_machine(
 	return network_game_server_write(network_game_server_get_connection(server), buffer, size, &address, 0);
 }
 
+/* DCE official server: the address the game writes to a machine in the game at (0 if none) */
+unsigned long network_distributed_machine_address(
+	long machine_index)
+{
+	struct network_game_server *server = global_network_game_server_get();
+	struct network_game_server_client_machine *machine;
+	struct network_connection *connection;
+	struct transport_address address;
+
+	if (!server)
+		return 0;
+	machine = network_game_server_client_machine_in_game(server, machine_index);
+	if (!machine)
+		return 0;
+	connection = network_game_server_get_client_connection(machine);
+	if (!connection || !network_connection_active(connection))
+		return 0;
+	network_connection_get_address(connection, &address, NULL);
+	return address.address.long_words[0];
+}
+
 /* reliably to one machine in the game (the host's objects, to a client
 that has loaded) */
 boolean network_distributed_server_send_to_machine_reliably(

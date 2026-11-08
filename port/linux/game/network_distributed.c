@@ -696,7 +696,12 @@ static boolean distributed_client_build_known[HALO_PORT_MAXIMUM_NETWORK_MACHINES
 #define DCE_SLOW_PERIOD_MAX 10
 #define DCE_SLOW_WINDOW_TICKS 30 /* one second */
 #define DCE_SLOW_WIRE_OVERHEAD 36 /* IP, UDP and tunnel bytes on each datagram */
-#define DCE_SLOW_BUDGET_DEFAULT 1700 /* counted bytes; at 33.6k (3360 B/s) the line then carries about 1.8 KB/s with acks and the reliable stream */
+extern void (*transport_write_observer)(unsigned long address, long length);
+unsigned long network_distributed_machine_address(long machine_index);
+/* each modem client's address as the game writes to it (0: none), and how many there are */
+static unsigned long distributed_slow_addresses[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
+static short distributed_slow_machine_count;
+#define DCE_SLOW_BUDGET_DEFAULT 2000 /* every byte written to it, resends included, of a 33.6k line's 3360 B/s */
 /* DCE official server: per modem client, a period that follows the bytes it is sent */
 static long distributed_slow_bytes[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 static long distributed_slow_window_start[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
@@ -729,11 +734,28 @@ static long distributed_slow_budget(void)
 	}
 	return budget;
 }
+/* every datagram the game writes (resends and the reliable stream too): a modem client's is metered */
+static void distributed_slow_note_write(unsigned long address, long length)
+{
+	long machine_index;
+
+	if (!distributed_slow_machine_count || !address)
+		return;
+	for (machine_index = 0; machine_index < HALO_PORT_MAXIMUM_NETWORK_MACHINES; machine_index++)
+	{
+		if (distributed_slow_addresses[machine_index] == address)
+		{
+			distributed_slow_bytes[machine_index] += length + DCE_SLOW_WIRE_OVERHEAD;
+			return;
+		}
+	}
+}
 /* once a tick: each modem client's bytes over the last second move its period */
 static void distributed_slow_adapt(void)
 {
 	long now = game_time_get();
 	long machine_index;
+	short slow_count = 0;
 
 	for (machine_index = 0; machine_index < HALO_PORT_MAXIMUM_NETWORK_MACHINES; machine_index++)
 	{
@@ -741,12 +763,15 @@ static void distributed_slow_adapt(void)
 
 		if (!distributed_machine_slow_line(machine_index))
 		{
+			distributed_slow_addresses[machine_index] = 0;
 			distributed_slow_period[machine_index] = 0;
 			distributed_slow_bytes[machine_index] = 0;
 			distributed_slow_window_start[machine_index] = now;
 			distributed_slow_windows[machine_index] = 0;
 			continue;
 		}
+		distributed_slow_addresses[machine_index] = network_distributed_machine_address(machine_index);
+		slow_count++;
 		if (ticks < 0)
 			distributed_slow_window_start[machine_index] = now, distributed_slow_bytes[machine_index] = 0;
 		else if (ticks >= DCE_SLOW_WINDOW_TICKS)
@@ -773,6 +798,8 @@ static void distributed_slow_adapt(void)
 			distributed_slow_window_start[machine_index] = now;
 		}
 	}
+	distributed_slow_machine_count = slow_count;
+	transport_write_observer = slow_count ? distributed_slow_note_write : NULL;
 }
 static boolean distributed_build_sent;
 static boolean distributed_identity_sent;
@@ -1097,9 +1124,6 @@ static void distributed_batch_flush(
 	header->game_time = game_time_get();
 	header->header = 0;
 	build_message_header(&header->header, batch->size, 2, 0);
-	if (sender != HOST_SENDER && sender >= 0 && sender < HALO_PORT_MAXIMUM_NETWORK_MACHINES &&
-		distributed_machine_slow_line(sender))
-		distributed_slow_bytes[sender] += batch->size + DCE_SLOW_WIRE_OVERHEAD;
 	if (sender == HOST_SENDER)
 		network_distributed_client_send(batch->data, batch->size);
 	else

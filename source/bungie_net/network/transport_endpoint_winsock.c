@@ -1613,6 +1613,10 @@ long read_from_endpoint(
 	return result;
 }
 
+/* DCE official server: told of each datagram written (its destination as the game has it, and
+its length), so the netcode can meter a modem client's line; NULL until a modem client joins */
+void (*transport_write_observer)(unsigned long address, long length) = NULL;
+
 long write_to_endpoint(
 	struct transport_endpoint *ep,
 	void const *buffer,
@@ -1651,6 +1655,8 @@ long write_to_endpoint(
 			0,
 			(struct sockaddr const *)&socket_address,
 			sizeof(socket_address));
+		if (transport_write_observer && result > 0)
+			transport_write_observer(dest_addr->address.long_words[0], length);
 	}
 	else
 	{
