@@ -126,6 +126,7 @@ enum
 	/* a modem peer's streams: KCP's normal mode, flushed every 100 ms, so
 	small reliable messages and their acks share packets */
 	SLOW_STREAM_INTERVAL = 100,
+	SLOW_LINE_HOLD = 2000,
 	PUNCH_INTERVAL = 200,
 	PING_INTERVAL = 1000,
 	ENDPOINT_SWITCH_TIME = 3000,
@@ -230,6 +231,10 @@ struct peer
 	modem line (p2p_set_slow_line: its streams batch) */
 	long wire_out;
 	int slow_line;
+	/* when the netcode last named it a modem line (p2p_set_slow_line, each
+	match tick): not named for SLOW_LINE_HOLD, its streams go back to turbo,
+	so join, settings, lobby and map load are never batched */
+	unsigned long slow_seen;
 };
 
 /* a UDP stand-in for one port of a peer */
@@ -1359,6 +1364,8 @@ static void wire_report(void)
 	}
 }
 
+static void peer_set_slow_streams(struct peer *peer, int slow);
+
 static void update_peers(void)
 {
 	int index;
@@ -1371,6 +1378,8 @@ static void update_peers(void)
 
 		if (!peer->used)
 			continue;
+		if (peer->slow_line && elapsed(peer->slow_seen, SLOW_LINE_HOLD))
+			peer_set_slow_streams(peer, 0);
 		if (peer->connected)
 		{
 			if (elapsed(peer->heard_time, PEER_TIMEOUT))
@@ -4134,21 +4143,39 @@ long p2p_take_wire_bytes(unsigned long game_address)
 	return bytes;
 }
 
-void p2p_set_slow_line(unsigned long game_address)
+static void peer_set_slow_streams(struct peer *peer, int slow)
 {
-	struct peer *peer = find_peer_by_address(network_long(game_address));
 	int index;
 
-	if (!peer || peer->slow_line)
-		return;
-	peer->slow_line = 1;
+	peer->slow_line = slow;
 	for (index = 0; index < MAXIMUM_STREAMS; index++)
 	{
 		struct stream *stream = &p2p.streams[index];
 
 		if (stream->used && stream->kcp && &p2p.peers[stream->peer] == peer)
-			ikcp_nodelay(stream->kcp, 0, SLOW_STREAM_INTERVAL, 0, 0);
+		{
+			if (slow)
+				ikcp_nodelay(stream->kcp, 0, SLOW_STREAM_INTERVAL, 0, 0);
+			else
+				ikcp_nodelay(stream->kcp, 1, LOOP_INTERVAL, 2, 1);
+		}
 	}
-	platform_log("Internet play: %s is on a modem line: its streams batch every %d ms", peer->name,
-		(int)SLOW_STREAM_INTERVAL);
+	if (slow)
+		platform_log("Internet play: %s is on a modem line in a match: its streams batch every %d ms", peer->name,
+			(int)SLOW_STREAM_INTERVAL);
+	else
+		platform_log("Internet play: %s is out of a match: its streams are unthrottled", peer->name);
+}
+
+/* DCE official server: called each match tick for a modem client; out of a match
+(join, settings, lobby, map load) nobody calls it and the line is unthrottled */
+void p2p_set_slow_line(unsigned long game_address)
+{
+	struct peer *peer = find_peer_by_address(network_long(game_address));
+
+	if (!peer)
+		return;
+	peer->slow_seen = p2p_now();
+	if (!peer->slow_line)
+		peer_set_slow_streams(peer, 1);
 }
