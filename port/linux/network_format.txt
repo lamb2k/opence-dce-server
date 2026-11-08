@@ -1,4 +1,4 @@
-version 41
+version 42
 bound CHAT_TEXT_SIZE 64
 bound DISCORD_ID_SIZE 24
 bound DISCORD_NAME_SIZE 40
@@ -67,6 +67,12 @@ enum _distributed_message_chat_up 87
 enum _distributed_message_client_build 92
 enum _distributed_message_client_identity 18
 enum _distributed_message_client_ready 9
+enum _distributed_message_compact_game_state 98
+enum _distributed_message_compact_kills 97
+enum _distributed_message_compact_object_changes 96
+enum _distributed_message_compact_object_states 100
+enum _distributed_message_compact_relayed_actions 101
+enum _distributed_message_compact_unit_states 99
 enum _distributed_message_coop_device_groups 68
 enum _distributed_message_coop_device_states 77
 enum _distributed_message_coop_events 71

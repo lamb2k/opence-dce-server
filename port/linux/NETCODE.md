@@ -329,6 +329,41 @@ game's flags also tell its clients whether the host is a dedicated server
 (`_network_game_cooperative_dedicated_bit`: its loading zones then ask for
 most of the living players).
 
+Then version 42 gives a host's clients one compact form of what it sends them most
+(`dce_compact.c`, `network_reliable.c`; a Dreamcast reads the same bytes in `src/net`). It
+exists for a client on a modem, but every client gets it, so there is one wire format and a
+build before it is refused at the join like any other (the game then names the version).
+The modules still build the wide messages they always had; on the way to each machine they
+become the compact ones, and a client expands them again before the handlers read them.
+
+- Over a machine's stream (`_distributed_message_compact_object_changes`, 96, and
+  `_distributed_message_compact_game_state`, 98): an object change is a delete (5 bytes) or a
+  create of 28 bytes or so (its position in 24 bits an axis, at 1/256 world unit, its facing
+  in 4 bytes as the three smallest parts of a quaternion, its colors and regions only when
+  not those of the last object made of the same definition, the table of which each end
+  keeps); the game state is the bytes that differ from the last one sent. Each begins with a
+  byte, the stream's generation, and an end that sees another begins its tables again (so a
+  game's start, a full send of the host's objects, or a write that failed, never leaves the
+  ends disagreeing). The other reliable messages are as before.
+- In datagrams (`_distributed_message_compact_unit_states`, 99,
+  `_distributed_message_compact_object_states`, 100, and
+  `_distributed_message_compact_relayed_actions`, 101, which replace types 2, 6 and 15 to
+  clients): each record is a whole one (a key) or the difference from the last the host sent
+  that machine for that player or object (a delta, naming that record's number). A client
+  holds the last it took of each; a delta whose base it does not have (a datagram lost, an
+  object not yet made) is dropped, and the client sets bit 0 of the `pad` byte of its
+  next input, on which the host sends keys (at most every half second). The host sends a key
+  at least every tenth record whatever it hears. Types 2, 6 and 15 are no longer sent to
+  clients (a host takes them only from the code that builds the compact ones, in the
+  tests).
+- To a client the host's line says is a modem (`distributed_machine_slow_line`), the
+  objects that are not units are sent paced to the line, behind the units, a spawn and a
+  player's own units never waiting for them, and the creation of an object a modem has not
+  yet been told of is not followed by its states. Its stream's KCP is tuned to a slow line
+  (a window of 8, a floor of one second on the retransmission timeout, no fast resend, a dead
+  link after 60 tries), as the host's tunnel (`port/linux/src/p2p.c`) does for a client that
+  advertises a small window.
+
 `port/linux/network_format.txt` records the wire format of the current
 version (`tools/network_format.py`): `test_linux_port.py` fails when the
 sources' messages, kinds, bits, structs sent whole or the sizes of their
