@@ -897,7 +897,8 @@ static void packet_nonce(const unsigned char *packet, unsigned char *nonce)
 /* DCE: HALO_DCE_WIRE_LOG=1, the tunnel's packets each way per peer by kind, logged each second
 (kinds: 0 ping, 1 pong, 2 game datagram, 3 KCP push, 4 KCP ack, 5 KCP other, 6 bye; bytes on the
 wire, IP and UDP included) */
-enum { WIRE_KINDS = 7, WIRE_IP_UDP = 28 };
+enum { WIRE_KINDS = 8, WIRE_IP_UDP = 28 };
+static unsigned long wire_highest_sn[P2P_MAXIMUM_PEERS];
 static int wire_log = -1;
 static unsigned long wire_time;
 static long wire_count[P2P_MAXIMUM_PEERS][2][WIRE_KINDS];
@@ -1307,13 +1308,24 @@ static void wire_note(const struct peer *peer, int incoming, const unsigned char
 	if (!wire_log || size < 1 || peer_index < 0 || peer_index >= P2P_MAXIMUM_PEERS)
 		return;
 	kind = wire_kind(inner, size);
+	/* (a push's sn, at 12 past the conversation: a resend when not above the highest sent) */
+	if (kind == 3 && !incoming && size >= 1 + 24)
+	{
+		unsigned long sn = (unsigned long)inner[13] | (unsigned long)inner[14] << 8 |
+			(unsigned long)inner[15] << 16 | (unsigned long)inner[16] << 24;
+
+		if (sn <= wire_highest_sn[peer_index] && wire_highest_sn[peer_index])
+			kind = 7;
+		else
+			wire_highest_sn[peer_index] = sn;
+	}
 	wire_count[peer_index][incoming][kind]++;
 	wire_bytes[peer_index][incoming][kind] += wire;
 }
 
 static void wire_report(void)
 {
-	static const char *const names[WIRE_KINDS] = { "ping", "pong", "dgram", "push", "ack", "kcp", "bye" };
+	static const char *const names[WIRE_KINDS] = { "ping", "pong", "dgram", "push", "ack", "kcp", "bye", "resend" };
 	unsigned long now = p2p_now();
 	int index;
 
