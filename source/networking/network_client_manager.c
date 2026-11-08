@@ -2807,7 +2807,7 @@ static boolean network_game_client_idle_searching(
 			struct transport_address server_address;
 
 			server_address.address.long_words[0] = IPV4_LOOPBACK_ADDRESS;
-			server_address.port = NETWORK_GAME_SERVER_PORT;
+			server_address.port = network_game_server_local_port();
 			server_address.address_length = IPV4_ADDRESS_LENGTH;
 			local_game.platform = network_game_get_local_platform();
 

@@ -607,6 +607,9 @@ static const struct config_setting config_settings[] =
 	{ "network.tunnel_port", _config_integer, "0", "HALO_NET_TUNNEL_PORT", _environment_value, _platform_all,
 		"The UDP port internet play uses; 0 picks one. A fixed one can be\n"
 		"forwarded on the router, for networks whose NAT stops connections." },
+	{ "network.game_port", _config_integer, "5150", "HALO_NET_GAME_PORT", _environment_value, _platform_all,
+		"The local port a host's game binds (5150 as on the Xbox). Peers still\n"
+		"reach it as 5150 through the tunnel; give each server on a machine its own." },
 	{ "network.client_timeout_seconds", _config_integer, "15", "HALO_NET_CLIENT_TIMEOUT_SECONDS", _environment_value,
 		_platform_all,
 		"Seconds a host waits for a machine it hears nothing from before it\n"
