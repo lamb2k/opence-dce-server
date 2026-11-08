@@ -245,6 +245,8 @@ struct peer
 	that marks it a modem line (p2p_peer_is_modem) */
 	unsigned long max_remote_window;
 	long srtt;
+	/* since when its round trip has stayed at MODEM_RTT or more (0: not now) */
+	unsigned long slow_rtt_since;
 	int modem_guess;
 	int modem_logged;
 	/* its wire bucket (bytes; below 0 the game's datagrams wait their turn, dropped) */
@@ -2448,7 +2450,7 @@ static struct stream *stream_new(int peer_index, IUINT32 conversation)
 		stream->created_time = p2p_now();
 		ikcp_setoutput(stream->kcp, kcp_output);
 		if (p2p.peers[peer_index].slow_line)
-			ikcp_nodelay(stream->kcp, 0, SLOW_STREAM_INTERVAL, 0, 0);
+			ikcp_nodelay(stream->kcp, 1, SLOW_STREAM_INTERVAL, 2, 1);
 		else
 			ikcp_nodelay(stream->kcp, 1, LOOP_INTERVAL, 2, 1);
 		ikcp_wndsize(stream->kcp, 256, 256);
@@ -4242,7 +4244,7 @@ static void peer_set_slow_streams(struct peer *peer, int slow)
 		if (stream->used && stream->kcp && &p2p.peers[stream->peer] == peer)
 		{
 			if (slow)
-				ikcp_nodelay(stream->kcp, 0, SLOW_STREAM_INTERVAL, 0, 0);
+				ikcp_nodelay(stream->kcp, 1, SLOW_STREAM_INTERVAL, 2, 1);
 			else
 				ikcp_nodelay(stream->kcp, 1, LOOP_INTERVAL, 2, 1);
 			ikcp_setmtu(stream->kcp, slow ? SLOW_KCP_MTU : KCP_MTU);
@@ -4262,11 +4264,12 @@ but not yet acknowledged (-1: not a tunnel peer) */
 /* DCE official server: a Dreamcast's streams (a receive window of at most
 MODEM_WINDOW segments) whose round trip is at least MODEM_RTT ms are a modem
 line's, whatever the client says (it tells only once the map has loaded) */
-enum { MODEM_WINDOW = 32, MODEM_RTT = 120 };
+enum { MODEM_WINDOW = 8, MODEM_RTT = 120, MODEM_RTT_HOLD = 4000 };
 
 int p2p_peer_is_modem(unsigned long game_address)
 {
 	struct peer *peer = find_peer_by_address(network_long(game_address));
+	long srtt = 0;
 	int index;
 
 	if (!peer || !peer->connected)
@@ -4282,16 +4285,23 @@ int p2p_peer_is_modem(unsigned long game_address)
 		{
 			if (stream->kcp->rmt_wnd > peer->max_remote_window)
 				peer->max_remote_window = stream->kcp->rmt_wnd;
-			if (stream->kcp->rx_srtt > peer->srtt)
-				peer->srtt = stream->kcp->rx_srtt;
+			if (stream->kcp->rx_srtt > srtt)
+				srtt = stream->kcp->rx_srtt;
 		}
 	}
-	if (peer->max_remote_window && peer->max_remote_window <= MODEM_WINDOW && peer->srtt >= MODEM_RTT)
+	peer->srtt = srtt;
+	/* (a round trip that stays long, not one taken in a load stall: a broadband
+	Dreamcast offers 32 and a modem one 3, so the window decides first) */
+	if (!peer->max_remote_window || peer->max_remote_window > MODEM_WINDOW || srtt < MODEM_RTT)
+		peer->slow_rtt_since = 0;
+	else if (!peer->slow_rtt_since)
+		peer->slow_rtt_since = p2p_now() ? p2p_now() : 1;
+	else if (elapsed(peer->slow_rtt_since, MODEM_RTT_HOLD))
 	{
 		peer->modem_guess = 1;
 		if (!peer->modem_logged)
-			platform_log("Internet play: %s looks like a Dreamcast on a modem (window %lu, round trip %ld ms)",
-				peer->name, peer->max_remote_window, peer->srtt);
+			platform_log("Internet play: %s looks like a Dreamcast on a modem (window %lu, round trip %ld ms for %d s)",
+				peer->name, peer->max_remote_window, srtt, MODEM_RTT_HOLD / 1000);
 		peer->modem_logged = 1;
 	}
 	return peer->modem_guess;
