@@ -2937,6 +2937,48 @@ void distributed_debug_players(char *out, long size)
 	}
 }
 
+/* HALO_DCE_TEST_KILL=SECONDS[:MACHINE] (tests only): the host kills the one machine's player (the machine of a console
+client, 1 unless named) every so many seconds, for a death-to-respawn gate that does not wait for a shot to land */
+static void distributed_test_kill(void)
+{
+	static long period = -1;
+	static long target = 1;
+
+	if (period < 0)
+	{
+		char const *value = getenv("HALO_DCE_TEST_KILL");
+
+		period = value ? atol(value) * TICKS_PER_SECOND : 0;
+		if (value && strchr(value, ':'))
+			target = atol(strchr(value, ':') + 1);
+	}
+	if (period > 0 && game_time_get() > 30 * TICKS_PER_SECOND && game_time_get() % period == 0)
+	{
+		struct data_iterator iterator;
+		struct player_datum *player;
+		long victim = NONE, killer = NONE;
+
+		data_iterator_new(&iterator, player_data);
+		while ((player = (struct player_datum *)data_iterator_next(&iterator)) != NULL)
+		{
+			long absolute = DATUM_INDEX_TO_ABSOLUTE_INDEX(iterator.datum_index);
+
+			if (absolute < MAXIMUM_TRACKED_PLAYERS && distributed_player_machines[absolute] == target)
+			{
+				if (player->unit_index != NONE)
+					victim = player->unit_index;
+			}
+			else
+				killer = iterator.datum_index;
+		}
+		if (victim != NONE)
+		{
+			platform_log("network test: the host kills machine %ld's player at tick %ld", target, (long)game_time_get());
+			damage_kill_object_for_player(victim, killer);
+		}
+	}
+}
+
 /* HALO_DCE_LEGACY_DGRAM=1 (tests only: to compare a client's compact and wide datagrams on one build): the host's
 units, objects and actions go as types 2, 6 and 15 */
 boolean distributed_legacy_datagrams(void)
@@ -4412,6 +4454,7 @@ void network_distributed_tick(
 		{
 			profile_scope(distributed_tick_send_structure_bsp_section, distributed_send_structure_bsp();)
 		}
+		distributed_test_kill();
 		profile_scope(distributed_tick_send_players_section, distributed_host_send_players();)
 		profile_scope(distributed_tick_actors_host_tick_section, network_actors_host_tick();)
 		profile_scope(distributed_tick_coop_host_tick_section, network_coop_host_tick();)
