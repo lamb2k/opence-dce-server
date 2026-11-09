@@ -895,7 +895,8 @@ size_t dce_unit_decode(struct dce_unit_chain *chains, size_t chain_count, uint8_
 	struct dce_unit_chain *chain;
 	int i;
 
-	if (size < 4)
+	/* An unchanged delta is exactly head/base/mask (3 bytes). */
+	if (size < 3)
 		return 0;
 	head = *p++;
 	chain = (size_t)(head & 0x7F) < chain_count ? &chains[head & 0x7F] : NULL;
@@ -981,6 +982,9 @@ size_t dce_unit_decode(struct dce_unit_chain *chains, size_t chain_count, uint8_
 		struct dce_unit u;
 		uint8_t seq;
 
+		/* Keys additionally carry flags and parts. */
+		if (size < 4)
+			return 0;
 		memset(&u, 0, sizeof(u));
 		u.player = head;
 		u.killer = 255;
