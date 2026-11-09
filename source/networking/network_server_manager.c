@@ -890,10 +890,31 @@ static long network_game_server_held_player_count;
 enum
 {
 	NETWORK_GAME_SERVER_PLAYERLESS_MACHINE_TIMEOUT = 15 * MILLISECONDS_PER_SECOND,
+	/* port (dce): the time a machine that has added no player holds its slot,
+	from its join. Stock is the 15 s above: the game settings (a record of about
+	13 KB) reach a Dreamcast on a modem about 8 s after it joins at 33.6k and
+	about 18 s at 14.4k, and it asks for its player only after they arrive, so
+	the 15 s refused it (_rejection_code_game_is_closed) as it was still
+	downloading them. The time is bounded: a machine that stays silent is still
+	dropped, by its own timeouts (network_game_server_client_machine_timed_out)
+	or by this one. */
+	NETWORK_GAME_SERVER_PLAYERLESS_MACHINE_JOIN_TIMEOUT = 60 * MILLISECONDS_PER_SECOND,
 	/* the connections of one address that have not joined yet a server
 	takes (network_game_server_add_new_client) */
 	MAXIMUM_WAITING_CONNECTIONS_PER_ADDRESS = 2,
 };
+
+/* port (dce): whether a machine that has added no player has had its time:
+NETWORK_GAME_SERVER_PLAYERLESS_MACHINE_JOIN_TIMEOUT from its join, which a
+modem's download of the settings needs (a LAN machine adds its player in well
+under a second, so the longer time costs it nothing). Stock was
+NETWORK_GAME_SERVER_PLAYERLESS_MACHINE_TIMEOUT. */
+static boolean network_game_server_playerless_machine_expired(
+	long machine_index)
+{
+	return system_milliseconds() - network_game_server_client_machine_join_times[machine_index] >
+		NETWORK_GAME_SERVER_PLAYERLESS_MACHINE_JOIN_TIMEOUT;
+}
 
 /* port: the players added to the game in progress from each client
 machine's address (a machine joins from one address, and joining again
@@ -4034,8 +4055,7 @@ static boolean network_game_server_client_machine_timed_out(
 	the pregame holds its slot for nothing) */
 	if (!network_game_server_machine_has_players(server, machine->machine_index) &&
 		!network_game_server_machine_has_waiting_players(server, machine->machine_index) &&
-		system_milliseconds() - network_game_server_client_machine_join_times[machine->machine_index] >
-			NETWORK_GAME_SERVER_PLAYERLESS_MACHINE_TIMEOUT)
+		network_game_server_playerless_machine_expired(machine->machine_index))
 	{
 		return TRUE;
 	}
@@ -5312,8 +5332,7 @@ static boolean network_game_server_idle_pregame_tasks(
 				!network_game_server_machine_has_players(server, client_machine->machine_index) &&
 				!map_share_machine_downloading(client_machine->machine_index) &&
 				(!network_game_has_free_player_slot(&server->game) ||
-					system_milliseconds() - network_game_server_client_machine_join_times[client_machine->machine_index] >
-						NETWORK_GAME_SERVER_PLAYERLESS_MACHINE_TIMEOUT))
+					network_game_server_playerless_machine_expired(client_machine->machine_index)))
 			{
 				network_game_server_refuse_late_joiner(server, client_machine,
 					network_game_has_free_player_slot(&server->game) ? _rejection_code_game_is_closed :
