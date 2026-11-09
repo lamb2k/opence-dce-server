@@ -2937,12 +2937,11 @@ void distributed_debug_players(char *out, long size)
 	}
 }
 
-/* HALO_DCE_TEST_KILL=SECONDS[:MACHINE] (tests only): the host kills the one machine's player (the machine of a console
-client, 1 unless named) every so many seconds, for a death-to-respawn gate that does not wait for a shot to land */
+/* HALO_DCE_TEST_KILL=SECONDS[:MACHINE] (tests only): the host kills every player (or the one machine's, if named) every so many seconds, for a death-to-respawn gate that does not wait for a shot to land */
 static void distributed_test_kill(void)
 {
 	static long period = -1;
-	static long target = 1;
+	static long target = 0;
 
 	if (period < 0)
 	{
@@ -2956,25 +2955,26 @@ static void distributed_test_kill(void)
 	{
 		struct data_iterator iterator;
 		struct player_datum *player;
-		long victim = NONE, killer = NONE;
+		long killer = NONE;
 
+		data_iterator_new(&iterator, player_data);
+		while ((player = (struct player_datum *)data_iterator_next(&iterator)) != NULL)
+		{
+			if (killer == NONE)
+				killer = iterator.datum_index;
+		}
 		data_iterator_new(&iterator, player_data);
 		while ((player = (struct player_datum *)data_iterator_next(&iterator)) != NULL)
 		{
 			long absolute = DATUM_INDEX_TO_ABSOLUTE_INDEX(iterator.datum_index);
 
-			if (absolute < MAXIMUM_TRACKED_PLAYERS && distributed_player_machines[absolute] == target)
+			if (player->unit_index != NONE && absolute < MAXIMUM_TRACKED_PLAYERS &&
+				(!target || distributed_player_machines[absolute] == target))
 			{
-				if (player->unit_index != NONE)
-					victim = player->unit_index;
+				platform_log("network test: the host kills player %ld (machine %ld) at tick %ld", absolute,
+					distributed_player_machines[absolute], (long)game_time_get());
+				damage_kill_object_for_player(player->unit_index, killer);
 			}
-			else
-				killer = iterator.datum_index;
-		}
-		if (victim != NONE)
-		{
-			platform_log("network test: the host kills machine %ld's player at tick %ld", target, (long)game_time_get());
-			damage_kill_object_for_player(victim, killer);
 		}
 	}
 }
