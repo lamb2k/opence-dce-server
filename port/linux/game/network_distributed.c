@@ -2951,11 +2951,12 @@ static void distributed_test_kill(void)
 		if (value && strchr(value, ':'))
 			target = atol(strchr(value, ':') + 1);
 	}
-	if (period > 0 && game_time_get() > 30 * TICKS_PER_SECOND && game_time_get() % period == 0)
+	if (period > 0 && game_time_get() > 15 * TICKS_PER_SECOND && game_time_get() % period == 0)
 	{
 		struct data_iterator iterator;
 		struct player_datum *player;
-		long killer = NONE; /* no credit: a dedicated host leaves a remote player's damage to that machine's report (network_damage_deals) */
+		long killer = NONE;
+		extern void network_damage_test_deal(boolean on);
 
 		data_iterator_new(&iterator, player_data);
 		while ((player = (struct player_datum *)data_iterator_next(&iterator)) != NULL)
@@ -2965,9 +2966,21 @@ static void distributed_test_kill(void)
 			if (player->unit_index != NONE && absolute < MAXIMUM_TRACKED_PLAYERS &&
 				(!target || distributed_player_machines[absolute] == target))
 			{
+				struct data_iterator other_iterator;
+				struct player_datum *other;
+
+				/* the killer is another player (a kill, with a normal respawn time, not a suicide's penalty); a dedicated
+				host leaves a remote player's damage to that machine's report (network_damage_deals), so deal it as if reported */
+				killer = NONE;
+				data_iterator_new(&other_iterator, player_data);
+				while ((other = (struct player_datum *)data_iterator_next(&other_iterator)) != NULL)
+					if (other != player && killer == NONE)
+						killer = other_iterator.datum_index;
 				platform_log("network test: the host kills player %ld (machine %ld) at tick %ld", absolute,
 					distributed_player_machines[absolute], (long)game_time_get());
+				network_damage_test_deal(TRUE);
 				damage_kill_object_for_player(player->unit_index, killer);
+				network_damage_test_deal(FALSE);
 			}
 		}
 	}

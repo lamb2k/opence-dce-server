@@ -416,6 +416,13 @@ static struct distributed_damage_event damage_events[MAXIMUM_DAMAGE_EVENTS_PER_T
 static short damage_event_count;
 /* ... dealing a client's report */
 static boolean damage_dealing_report;
+
+/* (tests only: HALO_DCE_TEST_KILL) deals a kill credited to another machine's player as if that machine had reported it */
+void network_damage_test_deal(
+	boolean on)
+{
+	damage_dealing_report = on;
+}
 /* ... each player's weapons of late, and hits left */
 struct damage_stuck_projectile
 {
