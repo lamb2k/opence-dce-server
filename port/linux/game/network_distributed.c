@@ -2918,6 +2918,21 @@ static void distributed_handle_unit_state(
 /* (a client) a compact record was a difference from one it does not have: the host is asked for whole ones */
 static boolean distributed_need_keys;
 
+/* HALO_DCE_LEGACY_DGRAM=1 (tests only: to compare a client's compact and wide datagrams on one build): the host's
+units, objects and actions go as types 2, 6 and 15 */
+boolean distributed_legacy_datagrams(void)
+{
+	static int on = -1;
+
+	if (on < 0)
+	{
+		char const *value = getenv("HALO_DCE_LEGACY_DGRAM");
+
+		on = value && value[0] == '1';
+	}
+	return on != 0;
+}
+
 void distributed_note_keys_needed(void)
 {
 	distributed_need_keys = TRUE;
@@ -3674,6 +3689,36 @@ static void distributed_host_send_players(
 		long machine_index = machine_indices[machine_number];
 		short player_index;
 
+		if (distributed_legacy_datagrams())
+		{
+			distributed_packer_begin(&distributed_packer, (short)machine_index, _distributed_message_relayed_actions,
+				&distributed_host_update_number, sizeof(distributed_host_update_number));
+			for (player_index = 0; player_index < MAXIMUM_TRACKED_PLAYERS; player_index++)
+			{
+				byte entry[DISTRIBUTED_RELAYED_ACTION_MAXIMUM_SIZE];
+
+				if (TEST_FLAG(distributed_sends[machine_index][player_index], _distributed_send_action_bit))
+				{
+					distributed_packer_add(&distributed_packer, entry,
+						distributed_relayed_action_write(&distributed_host_actions[player_index], entry));
+				}
+			}
+			distributed_packer_flush(&distributed_packer);
+			distributed_packer_begin(&distributed_packer, (short)machine_index, _distributed_message_unit_states, NULL, 0);
+			for (player_index = 0; player_index < MAXIMUM_TRACKED_PLAYERS; player_index++)
+			{
+				byte entry[DISTRIBUTED_UNIT_STATE_MAXIMUM_SIZE];
+
+				if (TEST_FLAG(distributed_sends[machine_index][player_index], _distributed_send_state_bit))
+				{
+					distributed_packer_add(&distributed_packer, entry,
+						distributed_unit_state_write(&distributed_host_states[player_index],
+							distributed_player_machines[player_index] == machine_index, entry));
+				}
+			}
+			distributed_packer_flush(&distributed_packer);
+			continue;
+		}
 		distributed_packer_begin(&distributed_packer, (short)machine_index, _distributed_message_compact_relayed_actions,
 			&distributed_host_update_number, sizeof(distributed_host_update_number));
 		for (player_index = 0; player_index < MAXIMUM_TRACKED_PLAYERS; player_index++)

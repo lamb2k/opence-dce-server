@@ -283,6 +283,8 @@ boolean network_reliable_object_pending(long machine_index, long object_index);
 void network_reliable_resync(long machine_index);
 /* (a client) a record of the host's was a difference from one it does not have: the host is asked for whole ones */
 void distributed_note_keys_needed(void);
+/* HALO_DCE_LEGACY_DGRAM=1 (tests only): the host's datagrams to clients in the wide forms */
+boolean distributed_legacy_datagrams(void);
 /* (a client) a compact record of the host's: the bytes read, 0 if bad; *status 1 for a record, 0 for a difference
 whose base this machine does not have (dropped) */
 size_t network_reliable_unit_decode(byte const *in, size_t size, struct dce_unit *unit, int *status);

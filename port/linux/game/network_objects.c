@@ -1578,6 +1578,12 @@ static void distributed_send_object_states(
 	short in_message = 0;
 	short index;
 
+	if (distributed_legacy_datagrams())
+	{
+		distributed_send_to_machine(machine_index, (void *)message, _distributed_message_object_states, count,
+			(word)(sizeof(message->header) + count * sizeof(struct distributed_object_state)));
+		return;
+	}
 	for (index = 0; index < count; index++)
 	{
 		struct dce_object object;
