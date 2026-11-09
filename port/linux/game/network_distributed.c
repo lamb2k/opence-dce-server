@@ -2955,14 +2955,8 @@ static void distributed_test_kill(void)
 	{
 		struct data_iterator iterator;
 		struct player_datum *player;
-		long killer = NONE;
+		long killer = NONE; /* no credit: a dedicated host leaves a remote player's damage to that machine's report (network_damage_deals) */
 
-		data_iterator_new(&iterator, player_data);
-		while ((player = (struct player_datum *)data_iterator_next(&iterator)) != NULL)
-		{
-			if (killer == NONE)
-				killer = iterator.datum_index;
-		}
 		data_iterator_new(&iterator, player_data);
 		while ((player = (struct player_datum *)data_iterator_next(&iterator)) != NULL)
 		{
