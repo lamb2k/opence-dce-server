@@ -64,6 +64,7 @@ int config_reload(char const *prefix);
 void platform_log(char const *format, ...);
 unsigned long system_milliseconds(void);
 extern boolean debug_no_drawing;
+void network_distributed_log_modem_budget(void);
 /* (menu_functions.c's) */
 extern boolean ui_widget_port_cooperative_level_choose(char const *map_name, short difficulty);
 extern void ui_widget_port_cooperative_settings_apply(void);
@@ -2337,6 +2338,7 @@ void server_update(
 			server_log(_server_log_info, "server", "ready (tunnel %ld/udp, web %s, listing %s)",
 				config_boolean("network.online") ? config_integer("network.tunnel_port") : 0L, web,
 				!config_boolean("network.online") ? "LAN only" : config_boolean("server.public") ? "public" : "by invite");
+			network_distributed_log_modem_budget();
 		}
 	}
 	server.status_file_seconds += seconds;

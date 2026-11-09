@@ -78,6 +78,7 @@ machine (their datum identifiers need not be).
 #include "units/bipeds.h"
 #include "network_coop.h"
 #include "network_distributed.h"
+#include "dce_modem_adapt.h"
 #include "network_link.h"
 #include "network_voice.h"
 #include "network_chat.h"
@@ -703,6 +704,10 @@ unsigned long network_distributed_machine_address(long machine_index);
 its batching for a modem peer (port/linux/src/p2p.c) */
 long p2p_take_wire_bytes(unsigned long game_address);
 void p2p_set_slow_line(unsigned long game_address);
+/* its acknowledgements' shortest round trip and its resends since the last call, and the
+tunnel's wire rate for a modem peer (port/linux/src/p2p.c) */
+long p2p_take_line_samples(unsigned long game_address, long *resends);
+long p2p_slow_wire_rate(void);
 /* each modem client's address as the game writes to it (0: none), and how many there are */
 static unsigned long distributed_slow_addresses[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 static short distributed_slow_machine_count;
@@ -712,6 +717,9 @@ static long distributed_slow_bytes[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 static long distributed_slow_window_start[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 static short distributed_slow_period[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 static short distributed_slow_windows[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
+/* HALO_DCE_MODEM_ADAPT (on unless 0): each modem client's budget measured on its line
+(dce_modem_adapt.h), not fixed */
+static struct dce_modem_adapt distributed_slow_adapters[HALO_PORT_MAXIMUM_NETWORK_MACHINES];
 /* a change of a player's action not yet sent to a modem client */
 static boolean distributed_slow_action_due[HALO_PORT_MAXIMUM_NETWORK_MACHINES][MAXIMUM_TRACKED_PLAYERS];
 /* (the tunnel's own guess, refreshed each match tick in distributed_slow_adapt) */
@@ -742,6 +750,43 @@ static long distributed_slow_budget(void)
 			budget = 600;
 	}
 	return budget;
+}
+static boolean distributed_slow_adaptive(void)
+{
+	static int adaptive = -1;
+
+	if (adaptive < 0)
+	{
+		char const *value = getenv("HALO_DCE_MODEM_ADAPT");
+
+		adaptive = !value || !value[0] || atol(value) != 0;
+	}
+	return adaptive != 0;
+}
+/* the adaptive budget's ceiling: HALO_DCE_MODEM_BUDGET_MAX, else the tunnel's wire rate
+(HALO_DCE_MODEM_WIRE, 2400: above it the tunnel holds datagrams back), never under the start */
+static long distributed_slow_budget_ceiling(void)
+{
+	static long ceiling = -1;
+
+	if (ceiling < 0)
+	{
+		char const *value = getenv("HALO_DCE_MODEM_BUDGET_MAX");
+
+		ceiling = value && value[0] ? atol(value) : p2p_slow_wire_rate();
+		if (ceiling < distributed_slow_budget())
+			ceiling = distributed_slow_budget();
+	}
+	return ceiling;
+}
+/* the server's ready line: how modem clients are paced */
+void network_distributed_log_modem_budget(void)
+{
+	if (distributed_slow_adaptive())
+		platform_log("network: dce-modem adapt on: budget from %ld B/s, %d..%ld, measured on each modem client's line (HALO_DCE_MODEM_ADAPT=0: fixed)",
+			distributed_slow_budget(), DCE_MODEM_ADAPT_FLOOR, distributed_slow_budget_ceiling());
+	else
+		platform_log("network: dce-modem adapt off: budget fixed at %ld B/s", distributed_slow_budget());
 }
 /* every datagram the game writes (resends and the reliable stream too): a modem client's is metered */
 static void distributed_slow_note_write(unsigned long address, long length)
@@ -783,12 +828,27 @@ static void distributed_slow_adapt(void)
 			distributed_slow_bytes[machine_index] = 0;
 			distributed_slow_window_start[machine_index] = now;
 			distributed_slow_windows[machine_index] = 0;
+			distributed_slow_adapters[machine_index].ready = FALSE;
 			continue;
 		}
 		distributed_slow_addresses[machine_index] = network_distributed_machine_address(machine_index);
 		slow_count++;
 		if (distributed_slow_addresses[machine_index])
 			p2p_set_slow_line(distributed_slow_addresses[machine_index]);
+		if (distributed_slow_adaptive())
+		{
+			struct dce_modem_adapt *adapter = &distributed_slow_adapters[machine_index];
+			long resends = 0;
+			long round_trip = -1;
+
+			if (!adapter->ready)
+				dce_modem_adapt_init(adapter, distributed_slow_budget(), DCE_MODEM_ADAPT_FLOOR,
+					distributed_slow_budget_ceiling());
+			/* (each tick: its acknowledgements' round trips, its resends) */
+			if (distributed_slow_addresses[machine_index])
+				round_trip = p2p_take_line_samples(distributed_slow_addresses[machine_index], &resends);
+			dce_modem_adapt_note(adapter, round_trip, resends);
+		}
 		if (ticks < 0)
 			distributed_slow_window_start[machine_index] = now, distributed_slow_bytes[machine_index] = 0;
 		else if (ticks >= DCE_SLOW_WINDOW_TICKS)
@@ -802,6 +862,22 @@ static void distributed_slow_adapt(void)
 			short period = distributed_machine_slow_period(machine_index);
 			long budget = distributed_slow_budget();
 
+			if (distributed_slow_adaptive())
+			{
+				struct dce_modem_adapt *adapter = &distributed_slow_adapters[machine_index];
+				/* (one row a change, and every 10 s: the budget the line allows, the queue it shows) */
+				boolean changed = dce_modem_adapt_window(adapter, rate, &period);
+
+				distributed_slow_period[machine_index] = period;
+				if (changed || distributed_slow_windows[machine_index] % 10 == 0)
+					platform_log("network: dce-modem machine %ld sent %ld B/s, period %d ticks (budget %ld, adapt: queue %ld ms, ack round trip %ld ms shortest of %ld, %ld resends)",
+						machine_index, rate, period, dce_modem_adapt_budget(adapter), dce_modem_adapt_queue_ms(adapter),
+						adapter->last_rtt_min, adapter->last_samples, adapter->last_resends);
+				distributed_slow_windows[machine_index]++;
+				distributed_slow_bytes[machine_index] = 0;
+				distributed_slow_window_start[machine_index] = now;
+				continue;
+			}
 			if (rate > budget)
 			{
 				/* over: as many steps as the overshoot asks for, at once (a match's

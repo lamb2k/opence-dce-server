@@ -262,6 +262,11 @@ struct peer
 	long wire_tokens;
 	unsigned long wire_tokens_time;
 	long wire_dropped;
+	/* DCE: since the netcode last took them (p2p_take_line_samples), the shortest round trip
+	of the acknowledgements its streams' pieces got, and how many pieces they sent again */
+	int ack_round_trip_known;
+	long ack_round_trip;
+	long resends;
 };
 
 /* a UDP stand-in for one port of a peer */
@@ -2601,6 +2606,32 @@ static void stream_opened(struct stream *stream, const unsigned char *data, int 
 	stream->state = _stream_connecting;
 }
 
+/* DCE official server: a modem peer's acknowledgements, each carrying the time (this clock's,
+KCP's current) its piece was sent: the round trip of each, the shortest kept */
+static void note_ack_round_trips(struct peer *peer, const unsigned char *data, int size)
+{
+	IUINT32 now = (IUINT32)p2p_now();
+
+	while (size >= 24)
+	{
+		IUINT32 sent = (IUINT32)data[8] | (IUINT32)data[9] << 8 | (IUINT32)data[10] << 16 | (IUINT32)data[11] << 24;
+		IUINT32 length = (IUINT32)data[20] | (IUINT32)data[21] << 8 | (IUINT32)data[22] << 16 | (IUINT32)data[23] << 24;
+		long round_trip = (long)(IINT32)(now - sent);
+
+		/* (82: IKCP_CMD_ACK) */
+		if (data[4] == 82 && round_trip >= 0 && round_trip <= 60000 &&
+			(!peer->ack_round_trip_known || round_trip < peer->ack_round_trip))
+		{
+			peer->ack_round_trip = round_trip;
+			peer->ack_round_trip_known = 1;
+		}
+		if (length > (IUINT32)(size - 24))
+			break;
+		data += 24 + length;
+		size -= 24 + (int)length;
+	}
+}
+
 static void stream_received(struct peer *peer, const unsigned char *data, int size)
 {
 	int peer_index = (int)(peer - p2p.peers);
@@ -2611,6 +2642,8 @@ static void stream_received(struct peer *peer, const unsigned char *data, int si
 
 	if (size < 24 || peer->probe)
 		return;
+	if (peer->slow_line)
+		note_ack_round_trips(peer, data, size);
 	conversation = ikcp_getconv(data);
 	for (index = 0; index < MAXIMUM_STREAMS && !stream; index++)
 	{
@@ -2661,8 +2694,12 @@ static void stream_flush_pending(struct stream *stream)
 static void stream_update(struct stream *stream)
 {
 	unsigned char message[1 + STREAM_CHUNK_SIZE];
+	IUINT32 resent = stream->kcp->xmit;
 
 	ikcp_update(stream->kcp, p2p_now());
+	/* (DCE: a modem peer's pieces sent again, for p2p_take_line_samples) */
+	if (p2p.peers[stream->peer].slow_line)
+		p2p.peers[stream->peer].resends += (long)(stream->kcp->xmit - resent);
 	/* what the peer sent */
 	for (;;)
 	{
@@ -4264,6 +4301,24 @@ long p2p_take_wire_bytes(unsigned long game_address)
 	bytes = peer->wire_out;
 	peer->wire_out = 0;
 	return bytes;
+}
+
+/* DCE official server: a modem client's line since the last call: the shortest round trip
+its acknowledgements took (ms; -1: none came; -2: not a tunnel peer), and in *resends the
+pieces its streams sent again */
+long p2p_take_line_samples(unsigned long game_address, long *resends)
+{
+	struct peer *peer = find_peer_by_address(network_long(game_address));
+	long round_trip;
+
+	*resends = 0;
+	if (!peer || !peer->connected)
+		return -2;
+	*resends = peer->resends;
+	peer->resends = 0;
+	round_trip = peer->ack_round_trip_known ? peer->ack_round_trip : -1;
+	peer->ack_round_trip_known = 0;
+	return round_trip;
 }
 
 static void peer_set_slow_streams(struct peer *peer, int slow)
