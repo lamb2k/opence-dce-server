@@ -2815,7 +2815,7 @@ void damage_kill_object_for_player(
 		&scenario_get_game_globals()->falling_damage,
 		0,
 		struct game_globals_falling_damage);
-	struct player_datum *player = player_get(player_index);
+	struct player_datum *player = player_index != NONE ? player_get(player_index) : NULL;
 	struct damage_data damage;
 
 	if (falling_damage->falling_damage.index == NONE)
@@ -2823,8 +2823,10 @@ void damage_kill_object_for_player(
 	damage_data_new(&damage, falling_damage->falling_damage.index);
 	damage.scale = 1.f;
 	SET_FLAG(damage.flags, _damage_kill_instantly_bit, TRUE);
+	/* port: no killer (player_index NONE): a dedicated host does not deal a remote player's damage (network_damage_deals
+	waits for that machine's report), so a kill credited to a console client's player never happened */
 	damage.owner_player_index = player_index;
-	damage.owner_object_index = player->unit_index;
-	damage.owner_team_index = (short)player->team_index;
+	damage.owner_object_index = player ? player->unit_index : NONE;
+	damage.owner_team_index = player ? (short)player->team_index : NONE;
 	object_cause_damage(&damage, object_index, NONE, NONE, NONE, NULL);
 }
