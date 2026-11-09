@@ -2918,6 +2918,25 @@ static void distributed_handle_unit_state(
 /* (a client) a compact record was a difference from one it does not have: the host is asked for whole ones */
 static boolean distributed_need_keys;
 
+/* HALO_DCE_WIRE_LOG: how the host's players stand (machine, whether the unit exists, the respawn timer, deaths) */
+void distributed_debug_players(char *out, long size)
+{
+	struct data_iterator iterator;
+	struct player_datum *player;
+	long length = 0;
+
+	out[0] = 0;
+	data_iterator_new(&iterator, player_data);
+	while ((player = (struct player_datum *)data_iterator_next(&iterator)) != NULL && length < size - 60)
+	{
+		long absolute = DATUM_INDEX_TO_ABSOLUTE_INDEX(iterator.datum_index);
+
+		length += snprintf(out + length, (size_t)(size - length), " [p%ld m%ld u%d rt%d d%d]", absolute,
+			absolute < MAXIMUM_TRACKED_PLAYERS ? distributed_player_machines[absolute] : -9L, player->unit_index != NONE,
+			(int)player->respawn_timer, (int)player->statistics.deaths);
+	}
+}
+
 /* HALO_DCE_LEGACY_DGRAM=1 (tests only: to compare a client's compact and wide datagrams on one build): the host's
 units, objects and actions go as types 2, 6 and 15 */
 boolean distributed_legacy_datagrams(void)
