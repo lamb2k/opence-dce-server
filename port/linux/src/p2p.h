@@ -34,6 +34,21 @@ int p2p_peer_address(const unsigned char *identifier, unsigned long *address);
 /* the ping to the machine with this identifier, in milliseconds, if the
 tunnel reaches it; -1 if not, or not timed yet */
 int p2p_peer_ping(const unsigned char *identifier);
+/* (Halo Dreamcast Edition server patch) the tunnel's figures for the peer
+at this virtual address (network byte order, as p2p_peer_endpoint_address):
+its last ping and the shortest, ms (-1 none answered); its packets received
+and the numbers skipped that never came; its open KCP streams, the worst
+one's smoothed round trip and variation, ms (-1 with none), their resends.
+0 if it is no peer */
+struct p2p_link_stats
+{
+	long ping, best;
+	unsigned long packets, missing;
+	int streams;
+	long kcp_srtt, kcp_rttvar;
+	unsigned long kcp_resends;
+};
+int p2p_peer_link_stats(unsigned long virtual_address, struct p2p_link_stats *stats);
 
 /* a destination the game sends to or connects to (stream: a TCP socket;
 socket: the game's UDP socket connected to it, else -1): 1 if it is a peer's

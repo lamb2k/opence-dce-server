@@ -1888,6 +1888,7 @@ static void server_playing(
 
 	if (!game_engine_running() && !server_cooperative())
 		return;
+	server_status_log_latency(seconds);   /* (Halo Dreamcast Edition server patch) */
 	if (game_engine_running() && !game_engine_can_score())
 	{
 		/* the game over: its scores (or, skipped, at once the lobby) */

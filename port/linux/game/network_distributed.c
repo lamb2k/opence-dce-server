@@ -1735,6 +1735,26 @@ real distributed_machine_round_trip_ticks(
 	return distributed_round_trips[machine_index].average + 2.0f * distributed_round_trips[machine_index].deviation;
 }
 
+boolean distributed_machine_latency(
+	long machine_index,
+	long *ping,
+	long *jitter,
+	long *heard)
+{
+	*ping = *jitter = *heard = NONE;
+	if (machine_index < 0 || machine_index >= HALO_PORT_MAXIMUM_NETWORK_MACHINES)
+		return FALSE;
+	if (distributed_round_trips[machine_index].milliseconds_valid)
+		*ping = (long)(distributed_round_trips[machine_index].milliseconds + 0.5f);
+	else if (distributed_round_trips[machine_index].valid)
+		*ping = (long)(distributed_round_trips[machine_index].average * 1000.0f / TICKS_PER_SECOND + 0.5f);
+	if (distributed_round_trips[machine_index].valid)
+		*jitter = (long)(distributed_round_trips[machine_index].deviation * 1000.0f / TICKS_PER_SECOND + 0.5f);
+	if (distributed_round_trips[machine_index].heard)
+		*heard = (long)(system_milliseconds() - distributed_round_trips[machine_index].heard);
+	return distributed_round_trips[machine_index].valid || distributed_round_trips[machine_index].milliseconds_valid;
+}
+
 /* ---------- the latency meter's round trips */
 
 /* the milliseconds since this machine sent the messages of its tick (at

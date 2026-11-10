@@ -29,6 +29,8 @@ owner, or with server.log_addresses; the invite only for admins.
 #include "../src/server_events.h" /* port: port/linux/src/server_events.c */
 #include "../src/server_http.h" /* port: port/linux/src/server_http.c */
 #include "../src/server_json.h" /* port: port/linux/src/server_json.c */
+#include "../src/server_latency.h" /* port: Halo Dreamcast Edition server patch */
+#include "../src/server_log.h" /* port: port/linux/src/server_log.c */
 #include "../src/server_master.h" /* port: port/linux/src/server_master.c */
 #include "../src/posix_server.h" /* port: port/linux/src/posix_server.c */
 #include "../src/port_config.h" /* port: port/linux/src/port_config.c */
@@ -167,6 +169,73 @@ boolean server_status_scores_changed(
 	return changed;
 }
 
+/* (Halo Dreamcast Edition server patch) the player's link: the netcode's
+round trip, and an internet play peer's tunnel figures */
+static boolean server_status_latency(
+	long slot,
+	struct server_latency *latency)
+{
+	struct network_game *game = server_game();
+	long machine_index;
+	unsigned long address;
+
+	csmemset(latency, 0, sizeof(*latency));
+	latency->rtt = latency->jitter = latency->heard = NONE;
+	latency->tunnel_ping = latency->tunnel_best = latency->kcp_srtt = latency->kcp_rttvar = NONE;
+	if (!game || slot < 0 || slot >= MAXIMUM_SLOTS || !network_player_is_valid(&game->players[slot]))
+		return FALSE;
+	machine_index = game->players[slot].machine_index;
+	distributed_machine_latency(machine_index, &latency->rtt, &latency->jitter, &latency->heard);
+	address = network_game_server_machine_address(machine_index);
+	/* 100.64.0.0/10: an internet play peer's (p2p.c's in network byte order) */
+	if ((address & 0xFFC00000) == 0x64400000)
+	{
+		unsigned long network = (address >> 24) | ((address >> 8) & 0xFF00) | ((address << 8) & 0xFF0000) |
+			(address << 24);
+		struct p2p_link_stats stats;
+
+		if (p2p_peer_link_stats(network, &stats))
+		{
+			latency->tunnel = 1;
+			latency->tunnel_ping = stats.ping;
+			latency->tunnel_best = stats.best;
+			latency->packets = stats.packets;
+			latency->missing = stats.missing;
+			latency->streams = stats.streams;
+			latency->kcp_srtt = stats.kcp_srtt;
+			latency->kcp_rttvar = stats.kcp_rttvar;
+			latency->kcp_resends = stats.kcp_resends;
+		}
+	}
+	return TRUE;
+}
+
+void server_status_log_latency(
+	real seconds)
+{
+	static real elapsed;
+	struct network_game *game = server_game();
+	long slot;
+
+	elapsed += seconds;
+	if (elapsed < 30.0f)
+		return;
+	elapsed = 0.0f;
+	for (slot = 0; game && slot < MAXIMUM_SLOTS; slot++)
+	{
+		struct server_latency latency;
+		char name[16], line[400];
+
+		if (!network_player_is_valid(&game->players[slot]) || !server_status_player_name(slot, name, sizeof(name)) ||
+			!server_status_latency(slot, &latency))
+		{
+			continue;
+		}
+		server_latency_line(line, sizeof(line), slot, game->players[slot].machine_index, name, &latency);
+		server_log(_server_log_info, "latency", "%s", line);
+	}
+}
+
 void server_status_player(
 	struct server_json *json,
 	long slot,
@@ -195,6 +264,33 @@ void server_status_player(
 			server_json_null(json, "ping");
 		else
 			server_json_integer(json, "ping", ping);
+	}
+	/* (Halo Dreamcast Edition server patch) the link: as the latency log's */
+	{
+		struct server_latency latency;
+
+		if (server_status_latency(slot, &latency))
+		{
+			server_json_object_begin(json, "link");
+			server_json_integer(json, "rtt_ms", latency.rtt);
+			server_json_integer(json, "jitter_ms", latency.jitter);
+			server_json_integer(json, "heard_ms", latency.heard);
+			server_json_boolean(json, "tunnel", latency.tunnel);
+			server_json_integer(json, "tunnel_ping_ms", latency.tunnel_ping);
+			server_json_integer(json, "tunnel_best_ms", latency.tunnel_best);
+			server_json_integer(json, "packets", (long long)latency.packets);
+			server_json_integer(json, "missing", (long long)latency.missing);
+			server_json_integer(json, "loss_permille", (long long)server_latency_loss_permille(&latency));
+			server_json_integer(json, "kcp_streams", latency.streams);
+			server_json_integer(json, "kcp_srtt_ms", latency.kcp_srtt);
+			server_json_integer(json, "kcp_rttvar_ms", latency.kcp_rttvar);
+			server_json_integer(json, "kcp_resends", (long long)latency.kcp_resends);
+			server_json_object_end(json);
+		}
+		else
+		{
+			server_json_null(json, "link");
+		}
 	}
 	server_json_integer(json, "machine", player->machine_index);
 	server_json_integer(json, "joined", server_director_joined_time(slot) / 1000);
