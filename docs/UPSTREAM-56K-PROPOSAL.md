@@ -27,7 +27,7 @@ Full diff: [`899219cc...dce-compact-v42-adaptive`](https://github.com/lamb2k/ope
     and states go as per-machine delta chains;
   - join fixes so a slow line survives the 13 KB settings download.
 - **Result.** In-match wire fell from about 2.4 KB/s (line full, resends) to a median of about 1.0 to
-  1.1 KB/s at 3 updates a second. The owner's verdict on a real modem: "night and day".
+  1.1 KB/s at 3 updates a second. On a real Dreamcast over a modem the difference was "night and day".
 - **The problem.** We bumped the network version 41 to 42 and send the compact forms to every client,
   so DCE and stock clients and servers no longer mix.
 - **The ask.** An opt-in server setting, off by default, for servers capped at 2 to 4 players. A client
@@ -141,7 +141,7 @@ network.low_bandwidth_max_players = 4
 
 - B1 Dreamcast glue: the `dce-modem` mods token and the window and RTT heuristic. The explicit flag
   replaces both.
-- A7 adaptive budget. It is off in production: the owner's verdict on crossplay was that it "feels
+- A7 adaptive budget. It is off in production: in real cross-play it "felt
   pretty bad". In the live log it also fell to its 600 B/s floor while the line carried about 1 KB/s
   (section 4). It also drags in `port/third_party/net_budget` from our client.
 - A9 test hooks, unless you want a test-only build flag.
@@ -203,7 +203,7 @@ How to read it:
 - In the adaptive run (under 2 minutes), the budget climbed from 1,400 to 2,000 in 7 s, then fell to its 600
   floor about 7 s later and stayed at 600 to 900. Ack round trips read up to 1.3 s while the line carried about
   0.8 to 1.2 KB/s. That is one reason it is off.
-- Owner on real hardware (Dreamcast, modem, DreamPi): the fixed budget is "night and day" against stock
+- On real hardware (Dreamcast, modem, DreamPi): the fixed budget is "night and day" against stock
   pacing. Adaptive "feels pretty bad on crossplay".
 
 ### Latency lines (new, `5621ba7a`)
