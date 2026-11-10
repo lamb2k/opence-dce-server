@@ -38,6 +38,7 @@ Called from the main loop every frame (main.c).
 #include "network_distributed.h"
 #include "network_map_vote.h"
 #include "server_director.h"
+#include "../src/server_client_kind.h" /* port: Halo Dreamcast Edition server patch */
 #include "server_gametypes.h"
 
 #include "../src/p2p.h" /* port: port/linux/src/p2p.c, p2p_lobby.c */
@@ -1501,6 +1502,9 @@ static void server_note_players(
 				char const *hardware_id = network_game_server_machine_hardware_id(machine);
 
 				server_log(_server_log_info, "player", "%s joined (slot %ld, machine %ld)", name, slot, machine);
+				/* (Halo Dreamcast Edition server patch) what client it is, as its join tells */
+				server_log(_server_log_info, "client", "slot %ld machine %ld \"%s\": %s", slot, machine, name,
+					server_client_kind(hardware_id));
 				server.seen_joined[slot] = posix_server_unix_milliseconds();
 				if (address)
 				{

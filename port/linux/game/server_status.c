@@ -29,6 +29,7 @@ owner, or with server.log_addresses; the invite only for admins.
 #include "../src/server_events.h" /* port: port/linux/src/server_events.c */
 #include "../src/server_http.h" /* port: port/linux/src/server_http.c */
 #include "../src/server_json.h" /* port: port/linux/src/server_json.c */
+#include "../src/server_client_kind.h" /* port: Halo Dreamcast Edition server patch */
 #include "../src/server_latency.h" /* port: Halo Dreamcast Edition server patch */
 #include "../src/server_log.h" /* port: port/linux/src/server_log.c */
 #include "../src/server_master.h" /* port: port/linux/src/server_master.c */
@@ -231,7 +232,15 @@ void server_status_log_latency(
 		{
 			continue;
 		}
-		server_latency_line(line, sizeof(line), slot, game->players[slot].machine_index, name, &latency);
+		{
+			int length = server_latency_line(line, sizeof(line), slot, game->players[slot].machine_index, name, &latency);
+
+			if (length >= 0 && length < (int)sizeof(line) - 1)
+			{
+				snprintf(line + length, sizeof(line) - (size_t)length, "; client %s",
+					server_client_kind(network_game_server_machine_hardware_id(game->players[slot].machine_index)));
+			}
+		}
 		server_log(_server_log_info, "latency", "%s", line);
 	}
 }
@@ -292,6 +301,8 @@ void server_status_player(
 			server_json_null(json, "link");
 		}
 	}
+	/* (Halo Dreamcast Edition server patch) the client kind, as the log's */
+	server_json_string(json, "client", server_client_kind(network_game_server_machine_hardware_id(player->machine_index)));
 	server_json_integer(json, "machine", player->machine_index);
 	server_json_integer(json, "joined", server_director_joined_time(slot) / 1000);
 	{
