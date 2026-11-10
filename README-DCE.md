@@ -8,6 +8,7 @@ The OpenCE authors did not write or review this patch, and do not support it.
 
 - **Fixed identity:** `HALO_DCE_HOST_SEED` keeps the server's key across restarts, and `HALO_DCE_INVITE_TOKEN` keeps its invite token. Unset, both stay random as in OpenCE. `port/linux/src/p2p.c`.
 - **Per-player latency:** a `latency` log line per player every 30 s while a game runs, and `players[].link` in `/api/status`. See below.
+- **Client kind:** a `client` log line when a player joins (`Dreamcast`, `OpenCE` or `unknown`), the same word at the end of each `latency` line, and `players[].client` in `/api/status`. See below.
 
 The history below that commit is OpenCE's, unchanged.
 
@@ -40,3 +41,16 @@ While a game runs, the server logs one `latency` line per connected player every
 
 The same fields are in `/api/status` (and the status file) as `players[].link`. Code: port/linux/src/server_latency.h
 (tested by port/linux/tests/server_latency_test.c), p2p.c, network_distributed.c, server_status.c.
+
+## Client kind (Halo Dreamcast Edition server patch)
+
+A machine's join carries its name, its token and its hardware id, and nothing that names its platform. OpenCE's own builds
+(PC, Android, the web) send the hex of their hashed hardware id; the Halo Dreamcast Edition client sends 32 ASCII zeros. So
+the server logs, when a player joins:
+
+    INFO client: slot 1 machine 2 "Name": Dreamcast
+
+`Dreamcast` for the zeros, `OpenCE` for any other id (its platform not sent: PC, Android and web look the same),
+`unknown` for none. The same word ends each `latency` line (`; client Dreamcast`) and is `players[].client` in
+`/api/status`. Pure classification in `port/linux/src/server_client_kind.h`, tested by
+`port/linux/tests/server_client_kind_test.c`. Log only; nothing the server does changes.
