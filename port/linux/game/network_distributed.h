@@ -278,6 +278,11 @@ short distributed_client_machines(long *machine_indices, short maximum);
 /* (the host) how long a message takes that client and its answer back, in
 ticks (and its jitter), as its players' input messages tell */
 real distributed_machine_round_trip_ticks(long machine_index);
+/* (Halo Dreamcast Edition server patch; the host) a client machine's round
+trip for the server's latency log: the latency meter's smoothed ms (else
+the ticks' average as ms), its jitter (the smoothed deviation as ms) and
+the ms since it was last heard, each NONE unknown; FALSE before any is */
+boolean distributed_machine_latency(long machine_index, long *ping, long *jitter, long *heard);
 /* (a client) the host's latest tick it has had a message of, NONE for none */
 long distributed_latest_host_time(void);
 /* (a client) how long the host takes to have this machine's players and

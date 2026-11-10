@@ -158,6 +158,9 @@ void server_status_identity(struct server_json *json);
 void server_status_players(struct server_json *json, int role);
 /* one player, as the role sees him (a players[] element) */
 void server_status_player(struct server_json *json, long slot, int role);
+/* (Halo Dreamcast Edition server patch) while a game runs: a "latency" line
+per connected player every 30 s (server_latency.h) */
+void server_status_log_latency(real seconds);
 /* the maps there are */
 void server_status_maps(struct server_json *json);
 /* the gametypes there are, and their rules' schema */

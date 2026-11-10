@@ -216,6 +216,10 @@ struct peer
 	unsigned long endpoint_heard_time;
 	unsigned long sent_time;
 	unsigned long round_trip;
+	/* (Halo Dreamcast Edition server patch) its packets received, and the
+	numbers skipped that have not come (packet_received) */
+	unsigned long received_packets;
+	unsigned long missing_packets;
 	/* the pings answered, and the shortest round trip of them */
 	int pongs;
 	unsigned long shortest_round_trip;
@@ -1211,9 +1215,18 @@ static void packet_received(struct peer *peer, unsigned long long counter)
 	{
 		unsigned long long ahead = counter - peer->receive_highest;
 
+		/* (Halo Dreamcast Edition server patch: the numbers skipped are missing
+		until they come; not before the first) */
+		if (peer->received_packets)
+			peer->missing_packets += (unsigned long)(ahead - 1 < 100000 ? ahead - 1 : 100000);
 		peer->receive_window = ahead >= REPLAY_WINDOW ? 0 : peer->receive_window << ahead;
 		peer->receive_highest = counter;
 	}
+	else if (peer->missing_packets)
+	{
+		peer->missing_packets--;
+	}
+	peer->received_packets++;
 	peer->receive_window |= 1ULL << (peer->receive_highest - counter);
 }
 
@@ -2014,6 +2027,50 @@ int p2p_peer_address(const unsigned char *peer_identifier, unsigned long *addres
 	if (peer && !peer->probe)
 	{
 		*address = peer->virtual_address;
+		result = 1;
+	}
+	pthread_mutex_unlock(&p2p_lock);
+	return result;
+}
+
+int p2p_peer_link_stats(unsigned long virtual_address, struct p2p_link_stats *stats)
+{
+	struct peer *peer;
+	int result = 0;
+
+	if (!stats)
+		return 0;
+	memset(stats, 0, sizeof(*stats));
+	stats->ping = stats->best = stats->kcp_srtt = stats->kcp_rttvar = -1;
+	if (!p2p.running)
+		return 0;
+	pthread_mutex_lock(&p2p_lock);
+	peer = find_peer_by_address(virtual_address);
+	if (peer)
+	{
+		int peer_index = (int)(peer - p2p.peers), index;
+
+		if (peer->pongs)
+		{
+			stats->ping = (long)peer->round_trip;
+			stats->best = (long)peer->shortest_round_trip;
+		}
+		stats->packets = peer->received_packets;
+		stats->missing = peer->missing_packets;
+		for (index = 0; index < MAXIMUM_STREAMS; index++)
+		{
+			const struct stream *stream = &p2p.streams[index];
+
+			if (!stream->used || stream->peer != peer_index || !stream->kcp)
+				continue;
+			stats->streams++;
+			if (stream->kcp->rx_srtt > stats->kcp_srtt)
+			{
+				stats->kcp_srtt = stream->kcp->rx_srtt;
+				stats->kcp_rttvar = stream->kcp->rx_rttval;
+			}
+			stats->kcp_resends += stream->kcp->xmit;
+		}
 		result = 1;
 	}
 	pthread_mutex_unlock(&p2p_lock);
